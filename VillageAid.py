@@ -4168,6 +4168,24 @@ async def set_night_duration(interaction: discord.Interaction):
     await interaction.response.send_modal(NightDurationModal())
 
 # ====================== ROLE MANAGEMENT ======================
+
+@tree.command(name="reload_roles", description="Reload all default roles into the pool (admin only)")
+@app_commands.checks.has_permissions(administrator=True)
+async def reload_roles(interaction: discord.Interaction):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    # Force reload — delete existing and reinsert all defaults
+    c.execute("DELETE FROM game_roles WHERE guild_id=?", (interaction.guild_id,))
+    for name, team, cnt, desc in DEFAULT_ROLES:
+        c.execute("INSERT OR IGNORE INTO game_roles VALUES (?,?,?,?,?)",
+                  (interaction.guild_id, name, desc, cnt, team))
+    conn.commit()
+    conn.close()
+    invalidate_cache(interaction.guild_id)
+    await interaction.response.send_message(
+        f"✅ Reloaded **{len(DEFAULT_ROLES)}** default roles into the pool.",
+        ephemeral=True)
+
 @tree.command(name="add_role", description="Add or update a game role in the pool")
 @is_mod()
 @app_commands.describe(name="Role name", description="What this role does",
@@ -7084,9 +7102,54 @@ class MediumView(BaseNightView):
         self.add_item(sel)
 
     async def on_select(self, interaction):
-        target_id = int(interaction.data["values"][0])
-        await self._save_and_close(interaction, "medium", target_id,
-            f"Alignment check submitted on {interaction.guild.get_member(target_id).display_name}.")
+        target_id  = int(interaction.data["values"][0])
+        guild      = interaction.guild
+        guild_id   = interaction.guild_id
+        night_num  = db_get_night_num(guild_id)
+        db_save_night_action(guild_id, night_num, self.actor_id, "medium", target_id)
+
+        rows        = db_get_assignments(guild_id)
+        target_row  = next((r for r in rows if r[0] == target_id), None)
+        target_role = target_row[1] if target_row else "Unknown"
+        target_m    = guild.get_member(target_id)
+        target_name = target_m.display_name if target_m else str(target_id)
+
+        # Medium sees Good/Bad/Neutral — no role name ever revealed
+        # Special cases per role description
+        APPEARS_GOOD = {"Elite Alpha", "Blessed Wolf", "Werekitten", "Cursed"}
+        if target_role in APPEARS_GOOD:
+            alignment = "✅ Good"
+            color     = 0x27AE60
+        elif get_team(guild_id, target_role) == "wolf":
+            alignment = "❌ Bad"
+            color     = 0xC0392B
+        elif get_team(guild_id, target_role) == "neutral":
+            alignment = "⚖️ Neutral"
+            color     = 0xF39C12
+        else:
+            alignment = "✅ Good"
+            color     = 0x27AE60
+
+        # Send result to Medium's private channel only
+        actor_row = next((r for r in rows if r[0] == self.actor_id), None)
+        if actor_row and actor_row[3]:
+            priv_ch = guild.get_channel(actor_row[3])
+            if priv_ch:
+                await priv_ch.send(
+                    fmt(f"🌀 **Medium Result — Night {night_num}**\n"
+                        f"**{target_name}** — {alignment}"))
+
+        # Mod-log with full detail
+        actor = guild.get_member(self.actor_id)
+        await post_mod_log(guild,
+            f"🌀 **Medium Check** — Night {night_num}\n"
+            f"**Medium:** {actor.display_name if actor else self.actor_id}\n"
+            f"**Target:** {target_name} ({target_role})\n"
+            f"**Result sent:** {alignment}")
+
+        await interaction.response.edit_message(
+            content=fmt(f"✅ Alignment check submitted on {target_name}.\nResult sent to your channel."),
+            view=None)
 
 
 # ── Gravedigger ───────────────────────────────────────────────────────────
@@ -7989,170 +8052,42 @@ async def resolve_night_cmd(interaction: discord.Interaction):
 
 
 async def resolve_night(guild: discord.Guild, night_num: int):
-    guild_id       = guild.id
-    actions        = db_get_night_actions(guild_id, night_num)
-    wolf_votes_raw = db_get_wolf_votes(guild_id, night_num)
-    state          = cached_get_state(guild_id)
-    rows           = db_get_assignments(guild_id)
-    assignment_map = {r[0]: r[1] for r in rows}
-
-    def get_action(atype):
-        return next((a for a in actions if a[1] == atype), None)
-
-    protected_ids = set()
-    results       = []
-
-    bg = get_action("bodyguard")
-    if bg:
-        protected_ids.add(bg[2])
-        t = guild.get_member(bg[2])
-        results.append(f"🛡️ Bodyguard protected **{t.display_name if t else '?'}**.")
-
-    doc = get_action("doctor")
-    if doc:
-        protected_ids.add(doc[2])
-        t = guild.get_member(doc[2])
-        results.append(f"💊 Doctor protected **{t.display_name if t else '?'}**.")
-
-    killed_id = None
-    if wolf_votes_raw:
-        vote_count = {}
-        for _, tid in wolf_votes_raw:
-            vote_count[tid] = vote_count.get(tid, 0) + 1
-        killed_id = max(vote_count, key=vote_count.get)
-
-    witch_save = get_action("witch_save")
-    witch_kill = get_action("witch_kill")
-    if witch_save:
-        protected_ids.add(witch_save[2])
-        t = guild.get_member(witch_save[2])
-        results.append(f"🧙 Witch saved **{t.display_name if t else '?'}**.")
-    if witch_kill:
-        wkt = guild.get_member(witch_kill[2])
-        if witch_kill[2] not in protected_ids:
-            results.append(f"🧙 Witch poisoned **{wkt.display_name if wkt else '?'}**.")
-            await _eliminate_player(guild, witch_kill[2], "Witch's poison")
-        else:
-            results.append("🧙 Witch tried to poison someone but they were protected.")
-
-    if killed_id:
-        kill_target = guild.get_member(killed_id)
-        if killed_id in protected_ids:
-            results.append(f"🐺 Wolves targeted **{kill_target.display_name if kill_target else '?'}** — protected!")
-        else:
-            # Check if target is the Elder
-            kill_role = assignment_map.get(killed_id, "")
-            if kill_role == "Elder":
-                elder_dies = await handle_elder_hit(guild, guild_id, killed_by_vote=False)
-                if elder_dies:
-                    results.append(f"🐺 Wolves killed **{kill_target.display_name if kill_target else '?'}** (Elder — second hit).")
-                    await _eliminate_player(guild, killed_id, "Wolf attack")
-                else:
-                    results.append(f"🐺 Wolves targeted the Elder — they survived their first hit!")
-            else:
-                results.append(f"🐺 Wolves killed **{kill_target.display_name if kill_target else '?'}**.")
-                await _eliminate_player(guild, killed_id, "Wolf attack")
-    else:
-        results.append("🐺 Wolves did not agree on a target — no kill tonight.")
-
-    # ── Shapeshifter Night 1 deadline ────────────────────────────────────
-    if night_num == 1:
-        rows_ss = db_get_assignments(guild_id)
-        for pid, role, is_alive, ch_id in rows_ss:
-            if role == "Shapeshifter" and is_alive:
-                # Check if they submitted an action
-                submitted = any(a[0] == pid for a in actions if a[1] == "shapeshifter")
-                if not submitted:
-                    m_ss = guild.get_member(pid)
-                    if ch_id:
-                        priv = guild.get_channel(ch_id)
-                        if priv:
-                            await priv.send(fmt(
-                                "💀 You failed to shapeshift before the first morning.\n"
-                                "Your indecision has cost you your life."))
-                    await _eliminate_player(guild, pid, "Failed to shapeshift (Night 1 deadline)")
-                    results.append(f"🎭 Shapeshifter failed to act — eliminated at dawn.")
-
-    seer = get_action("seer")
-    if seer:
-        target_id   = seer[2]
-        target_role = assignment_map.get(target_id, "Unknown")
-        # Roles that appear differently to Seer than their actual team
-        APPEARS_AS_WOLF    = {"White Wolf", "Lycan"}
-        APPEARS_AS_VILLAGE = {"Cursed", "Werekitten"}
-        if target_role in APPEARS_AS_WOLF:
-            team = "wolf"
-        elif target_role in APPEARS_AS_VILLAGE:
-            team = "village"
-        elif target_role == "Blessed Wolf":
-            # First check appears as village, second+ check charm wears off — appears as wolf
-            check_count = db_get_check_count(guild_id, target_id)
-            db_increment_check_count(guild_id, target_id)
-            team = "village" if check_count == 0 else "wolf"
-            if check_count == 1:
-                # Add flavour note to mod-log — charm just wore off
-                await post_mod_log(guild,
-                    f"🐺 **Blessed Wolf charm worn off** — {guild.get_member(target_id).display_name if guild.get_member(target_id) else target_id}\n"
-                    f"Seer checked them a second time — now shows as **WOLF**.")
-        else:
-            team = get_team(guild_id, target_role)
-        target      = guild.get_member(target_id)
-        seer_ch_id  = next((r[3] for r in rows if r[0] == seer[0]), None)
-        seer_ch     = guild.get_channel(seer_ch_id) if seer_ch_id else None
-        if seer_ch:
-            is_wolf_r = team == "wolf"
-            yn        = "✅ Yes" if is_wolf_r else "❌ No"
-            await seer_ch.send(f"🔮 **Seer Result — Night {night_num}**\nIs **{target.display_name if target else '?'}** a wolf?  **{yn}**")
-        results.append("🔮 Seer investigated a player (result sent privately).")
+    """Mark phase as day, clear bond, notify mod — mod handles all resolution manually."""
+    guild_id = guild.id
 
     db_set_state(guild_id, phase="day")
-
-    # Clear Cupid bond — it only lasts one night
     db_clear_cupid_current(guild_id)
 
-    resolution_text = "\n".join(results) if results else "No actions taken."
-    await post_mod_log(guild, f"☀️ **Night {night_num} Resolution:**\n{resolution_text}")
+    # Pull submitted actions summary for mod reference
+    actions  = db_get_night_actions(guild_id, night_num)
+    rows     = db_get_assignments(guild_id)
+    npcs     = db_get_npcs(guild_id)
+    npc_map  = {n["npc_id"]: n["name"] for n in npcs}
+
+    action_lines = []
+    for actor_id, action_type, target_id in actions:
+        if action_type.startswith("_"):
+            continue  # skip internal pass markers
+        m_actor  = guild.get_member(actor_id)
+        actor_name = npc_map.get(actor_id) or (m_actor.display_name if m_actor else str(actor_id))
+        if target_id:
+            m_target = guild.get_member(target_id)
+            target_name = npc_map.get(target_id) or (m_target.display_name if m_target else str(target_id))
+        else:
+            target_name = "—"
+        label = action_type.replace("_", " ").title()
+        action_lines.append(f"• **{actor_name}** — {label} → {target_name}")
+
+    summary = "\n".join(action_lines) if action_lines else "No actions submitted."
+
+    await post_mod_log(guild,
+        f"☀️ **Night {night_num} has ended — ready to resolve**\n\n"
+        f"**Submitted actions:**\n{summary}\n\n"
+        f"Use `/eliminate` to apply deaths, then `/next_phase` or `/start_day_vote` when ready.")
+
     await log_event(guild, f"Day {night_num}", f"☀️ Day {night_num} begins — Night {night_num} resolved")
     await set_bot_status(f"☀️ Day {night_num} — discuss and vote")
-
-    # ── Build blood board deaths list ─────────────────────────────────────
-    bb_deaths  = []
-    bb_notable = []
-
-    for line in results:
-        if "Wolves killed" in line:
-            name = line.replace("🐺 Wolves killed **","").replace("**","").split(" (")[0].strip().split(" —")[0].strip()
-            bb_deaths.append({"name": name, "cause": "wolf"})
-        elif "Witch poisoned" in line:
-            name = line.replace("🧙 Witch poisoned **","").replace("**","").strip().rstrip(".")
-            bb_deaths.append({"name": name, "cause": "witch"})
-        elif "heartbreak" in line.lower():
-            name = line.replace("💘 **Cupid Bond triggered** —","").split("dies")[0].strip()
-            bb_deaths.append({"name": name, "cause": "cupid"})
-        elif "Elder" in line and "survived" in line:
-            bb_notable.append(random.choice(BLOOD_BOARD_ELDER_SURVIVED))
-        elif "Diseased" in line or "poisoned" in line.lower() and "wolf" in line.lower():
-            bb_notable.append(random.choice(BLOOD_BOARD_DISEASED))
-        elif "protected" in line.lower():
-            bb_notable.append("Someone was kept safe last night. Someone else was not so lucky.")
-
-    # Post blood board suggestion to mod-log
-    asyncio.create_task(
-        post_blood_board_suggestion(guild, guild_id, night_num, bb_deaths, bb_notable))
-
-    # Collect plain names for day transition embed
-    night_deaths = [d["name"] for d in bb_deaths]
-
-    state_cur = cached_get_state(guild_id)
-    day_dur   = state_cur.get("day_duration", 50400)
-    await post_day_transition(guild, night_num, day_dur, night_deaths)
-
-    # Assign Jafar daily ability at start of each day
-    asyncio.create_task(assign_jafar_ability(guild, guild_id))
-
-    winner = await check_win_condition(guild)
-    if winner:
-        await announce_win(guild, winner)
+    await post_day_transition(guild, night_num, state=cached_get_state(guild_id))
 
 # ====================== FONT PICKER ======================
 
@@ -8397,53 +8332,98 @@ def db_get_night_order(guild_id, night_num):
     conn.close()
     return json.loads(row[0]) if row and row[0] else []
 
-@tree.command(name="spin_wheel", description="Spin the wheel to randomly determine tonight's order of operations")
+class SpinWheelView(View):
+    """Three independent spin dropdowns — Actions, Roles, Players. Results go to mod-log only."""
+    def __init__(self, guild_id, guild, night_num, actions, roles, players):
+        super().__init__(timeout=300)
+        self.guild_id  = guild_id
+        self.guild     = guild
+        self.night_num = night_num
+
+        # ── Dropdown 1: Actions ───────────────────────────────────────────
+        action_opts = [discord.SelectOption(label=a[:100], value=a) for a in actions[:25]]
+        sel_action  = Select(placeholder="🎡 Spin — Night Actions", options=action_opts)
+        sel_action.callback = self._make_spin_callback("Action", actions)
+        self.add_item(sel_action)
+
+        # ── Dropdown 2: Roles ─────────────────────────────────────────────
+        role_opts = [discord.SelectOption(label=r[:100], value=r) for r in roles[:25]]
+        sel_role  = Select(placeholder="🎡 Spin — Roles in Game", options=role_opts, row=1)
+        sel_role.callback = self._make_spin_callback("Role", roles)
+        self.add_item(sel_role)
+
+        # ── Dropdown 3: Players ───────────────────────────────────────────
+        player_opts = [discord.SelectOption(label=p[:100], value=p) for p in players[:25]]
+        sel_player  = Select(placeholder="🎡 Spin — Alive Players", options=player_opts, row=2)
+        sel_player.callback = self._make_spin_callback("Player", players)
+        self.add_item(sel_player)
+
+    def _make_spin_callback(self, spin_type: str, pool: list):
+        async def callback(interaction: discord.Interaction):
+            result = random.choice(pool)
+            await interaction.response.defer()
+            await post_mod_log(self.guild,
+                f"🎡 **Wheel Spin — {spin_type}** | Night {self.night_num}\n"
+                f"**Selected:** {result}")
+        return callback
+
+
+@tree.command(name="spin_wheel", description="Spin the wheel — actions, roles, or players")
 @is_mod()
 async def spin_wheel(interaction: discord.Interaction):
     if not game_active(interaction.guild_id):
         return await interaction.response.send_message("No active game.", ephemeral=True)
-    state = cached_get_state(interaction.guild_id)
-    if state.get("phase") != "night":
-        return await interaction.response.send_message(
-            "The wheel can only be spun during the night phase.", ephemeral=True)
     await interaction.response.defer(ephemeral=True)
 
-    night_num   = db_get_night_num(interaction.guild_id)
-    rows        = db_get_assignments(interaction.guild_id)
-    alive_roles = {r[1] for r in rows if r[2] == 1}
+    night_num = db_get_night_num(interaction.guild_id)
+    rows      = db_get_assignments(interaction.guild_id)
+    npcs      = db_get_npcs(interaction.guild_id)
+    npc_map   = {n["npc_id"]: n["name"] for n in npcs}
 
-    wheel_slots = []
-    wolf_alive = any(get_team(interaction.guild_id, r) == "wolf" for r in alive_roles)
-    if wolf_alive:
-        wheel_slots.append("Wolf")
-    for role_name in alive_roles:
-        if role_name in NIGHT_ROLE_ACTIONS and role_name != "Wolf":
-            wheel_slots.append(role_name)
+    # ── Actions pool ──────────────────────────────────────────────────────
+    actions = [
+        "Wolf Kill", "Seer Investigation", "Doctor Save", "Surgeon Save",
+        "Bodyguard Guard", "Witch Save Potion", "Witch Poison Potion",
+        "Huntsman Protect", "Medium Alignment Check", "Hermit Hide",
+        "Agitator Frenzy", "Governor Pardon", "Clone Inherit",
+        "Insomniac Hint", "Gravedigger Death Info", "Cupid Bind",
+        "Alpha Turn Attempt", "Elite Alpha Turn Attempt", "Bloodhound Identify",
+        "Bloodletter Mark", "Crazed Wolf Double Kill", "Dire Wolf Bond",
+        "Echo-Stalker Haunt", "Shadow Wolf Kill", "White Wolf Independent Kill",
+        "Oracle Question", "Shapeshifter Transform", "Wolf Pup Block",
+    ]
 
-    if not wheel_slots:
-        return await interaction.followup.send("No night-active roles found.", ephemeral=True)
+    # ── Roles pool — all roles in current game ────────────────────────────
+    last_roles = db_get_last_roles(interaction.guild_id)
+    if last_roles:
+        roles = list(last_roles.keys())
+    else:
+        roles = [r["name"] for r in cached_load_roles(interaction.guild_id)]
 
-    random.shuffle(wheel_slots)
-    final_order = wheel_slots[:]
-    db_save_night_order(interaction.guild_id, night_num, final_order)
+    # ── Players pool — all alive players ─────────────────────────────────
+    players = []
+    for pid, role_name, is_alive, _ in rows:
+        if not is_alive:
+            continue
+        name = npc_map.get(pid)
+        if not name:
+            m = interaction.guild.get_member(pid)
+            name = m.display_name if m else str(pid)
+        players.append(name)
 
-    order_lines = [f"**{i+1}.** {NIGHT_ROLE_ACTIONS.get(r, ('','Unknown'))[1]}"
-                   for i, r in enumerate(final_order)]
+    if not roles:
+        return await interaction.followup.send("No roles found.", ephemeral=True)
+    if not players:
+        return await interaction.followup.send("No alive players found.", ephemeral=True)
 
-    embed = discord.Embed(
-        title=f"Night {night_num} - Wheel Result",
-        description="The resolution order for tonight:",
-        color=0x9B59B6
-    )
-    embed.add_field(name="Order", value="\n".join(order_lines), inline=False)
-    embed.set_footer(text="Used automatically when /resolve_night runs")
-    await post_mod_log(interaction.guild, embed=embed)
-    await log_event(interaction.guild, f"Night {night_num}",
-                    "Wheel spun - order: " + " -> ".join(final_order))
+    view = SpinWheelView(
+        interaction.guild_id, interaction.guild, night_num,
+        actions, roles, players)
+
     await interaction.followup.send(
-        f"Wheel spun for Night {night_num}. Order posted to mod-log only.\n"
-        f"**Order:** {' -> '.join(final_order)}",
-        ephemeral=True)
+        f"🎡 **Wheel — Night {night_num}**\n"
+        f"Select from any dropdown to spin. Results go to mod-log only.",
+        view=view, ephemeral=True)
 
 
 # ====================== GAME SUMMARY ======================
@@ -8733,17 +8713,25 @@ class HelpCategorySelect(View):
         self.add_item(sel)
 
     async def on_select(self, interaction: discord.Interaction):
-        key      = interaction.data["values"][0]
-        section  = HELP_DATA[key]
-        embed    = discord.Embed(
-            title       = section["label"],
-            description = section["desc"],
-            color       = 0x5865F2
-        )
-        for cmd, desc in section["commands"]:
-            embed.add_field(name=cmd, value=desc, inline=False)
-        embed.set_footer(text="VillageAid · Use the dropdown to browse other categories.")
-        await interaction.response.edit_message(embed=embed, view=self)
+        try:
+            key      = interaction.data["values"][0]
+            section  = HELP_DATA[key]
+            embed    = discord.Embed(
+                title       = section["label"],
+                description = section["desc"],
+                color       = 0x5865F2
+            )
+            for cmd, desc in section["commands"]:
+                embed.add_field(name=cmd, value=desc[:1024], inline=False)
+            embed.set_footer(text="VillageAid · Use the dropdown to browse other categories.")
+            await interaction.response.edit_message(embed=embed, view=self)
+        except Exception as e:
+            print(f"[HelpCategorySelect] error: {e}")
+            try:
+                await interaction.response.send_message(
+                    f"❌ Error loading help section: {e}", ephemeral=True)
+            except Exception:
+                pass
 
 
 @tree.command(name="villagehelp", description="Browse all VillageAid commands by category")
