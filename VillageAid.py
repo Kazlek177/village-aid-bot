@@ -29,7 +29,9 @@ DB_FILE = os.path.join(_DB_DIR, "mafia_game.db")
 print(f"[DB] Using database at: {DB_FILE}")
 
 # Hardcoded village chat channel — not created by bot
-VILLAGE_CHAT_ID = 1482889389519409202
+VILLAGE_CHAT_ID  = 1482889389519409202
+# Hardcoded Blood Board channel — mods post approved BBs here
+BB_CHANNEL_ID    = 1481320638567419988
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -1409,7 +1411,10 @@ def is_mod():
 def game_active(guild_id):
     # Always check DB directly — cache can be stale if game just launched
     state = db_get_state(guild_id)
-    return bool(state and state.get("category_id"))
+    result = bool(state and state.get("category_id"))
+    if not result:
+        print(f"[game_active] FALSE for guild {guild_id} — state={state}")
+    return result
 
 async def post_mod_log(guild, message: str = "", embed=None):
     # Always hit DB fresh — avoids stale cache routing messages to wrong channel
@@ -2547,6 +2552,8 @@ async def refresh_timeline(guild):
 
 async def _npc_night_farewell(guild, guild_id: int):
     """NPCs say goodnight in village-chat when night starts."""
+    if not game_active(guild_id):
+        return
     state     = cached_get_state(guild_id)
     vc_ch     = guild.get_channel(state.get("village_chat_ch_id") or VILLAGE_CHAT_ID)
     if not vc_ch:
@@ -2692,8 +2699,7 @@ MAX_NPCS = 3
 
 # ── Claude API call ───────────────────────────────────────────────────────
 async def _claude(prompt: str, system: str, max_tokens: int = 300) -> str:
-    """Call the Anthropic API and return the text response."""
-    import json as _json
+    """Call the Anthropic API. Times out after 30s to prevent hanging tasks."""
     url = "https://api.anthropic.com/v1/messages"
     headers = {
         "x-api-key":         os.getenv("ANTHROPIC_API_KEY", ""),
@@ -2706,11 +2712,19 @@ async def _claude(prompt: str, system: str, max_tokens: int = 300) -> str:
         "system":     system,
         "messages":   [{"role": "user", "content": prompt}],
     }
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, headers=headers, json=body) as resp:
-            data = await resp.json()
-    blocks = data.get("content", [])
-    return " ".join(b.get("text","") for b in blocks if b.get("type") == "text").strip()
+    try:
+        timeout = aiohttp.ClientTimeout(total=30)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(url, headers=headers, json=body) as resp:
+                data = await resp.json()
+        blocks = data.get("content", [])
+        return " ".join(b.get("text","") for b in blocks if b.get("type") == "text").strip()
+    except asyncio.TimeoutError:
+        print("[_claude] API call timed out after 30s")
+        return ""
+    except Exception as e:
+        print(f"[_claude] API error: {e}")
+        return ""
 
 
 # ── Build game context string for NPC prompts ─────────────────────────────
@@ -2851,6 +2865,8 @@ async def _get_npc_webhook(guild, npc: dict) -> discord.Webhook:
 async def _npc_respond(guild, guild_id: int, npc: dict, trigger_message: str,
                        author_name: str, channel: discord.TextChannel):
     """Generate and post one NPC response to village-chat."""
+    if not game_active(guild_id):
+        return
     history    = npc.get("chat_history", [])
     game_ctx   = _npc_game_context(guild, guild_id, npc)
     system     = _npc_system_prompt(npc)
@@ -3405,6 +3421,8 @@ async def _npc_proactive_loop(guild, guild_id: int):
 # ── NPC death reaction ────────────────────────────────────────────────────
 async def _npc_react_to_death(guild, guild_id: int, dead_name: str):
     """Have alive NPCs react to a player death in village-chat."""
+    if not game_active(guild_id):
+        return
     state  = cached_get_state(guild_id)
     vc_ch  = guild.get_channel(state.get("village_chat_ch_id") or VILLAGE_CHAT_ID)
     if not vc_ch:
@@ -4913,6 +4931,10 @@ class ConfirmStartView(View):
             f"🎮 **Game started** — {len(players)} players\n"
             + "\n".join(f"• <@{pid}>: **{role}**" for pid, role in assignments.items()))
 
+        # ── Generate pre-game Blood Board for mod approval ────────────────
+        asyncio.create_task(_post_pregame_bloodboard(
+            interaction.guild, interaction.guild_id, players, assignments))
+
         # ── Prompt mod to start Night 1 ───────────────────────────────────
         view = StartNightPromptView(interaction.guild_id)
         await mod_log_ch.send(
@@ -5288,8 +5310,6 @@ class RemovePlayerModal(discord.ui.Modal, title="Remove a player from this claim
 @tree.command(name="claim", description="Open a private claim channel with another player")
 @app_commands.describe(player="The player you want to open a private claim with")
 async def claim(interaction: discord.Interaction, player: discord.Member):
-    if not game_active(interaction.guild_id):
-        return await interaction.response.send_message("No active game.", ephemeral=True)
     if player.id == interaction.user.id:
         return await interaction.response.send_message(
             "❌ You cannot open a claim with yourself.", ephemeral=True)
@@ -5299,11 +5319,12 @@ async def claim(interaction: discord.Interaction, player: discord.Member):
 
     await interaction.response.defer(ephemeral=True)
 
-    state    = cached_get_state(interaction.guild_id)
+    # Use fresh DB read — cache may not reflect game just started
+    state    = db_get_state(interaction.guild_id) or {}
     category = interaction.guild.get_channel(state.get("category_id") or 0)
     if not category:
         return await interaction.followup.send(
-            "❌ Game category not found.", ephemeral=True)
+            "❌ No active game category found. Make sure a game has been started.", ephemeral=True)
 
     everyone  = interaction.guild.default_role
     bot_me    = interaction.guild.me
@@ -6548,10 +6569,8 @@ async def _eliminate_player(guild: discord.Guild, player_id: int, reason: str):
                 partner_name = partner.display_name if partner else str(partner_id)
                 await post_mod_log(guild,
                     f"💘 **Cupid Bond triggered** — {partner_name} dies of heartbreak.")
-                # Notify partner in their private channel
-                # Partner is NOT notified why they die — mod-log only
-                # If the partner is a Shadow Wolf, their kill list uses the voters
-                # who voted out the original player (player_id), not themselves
+                # Clear bond BEFORE eliminating partner to prevent recursion
+                db_clear_cupid_current(guild.id)
                 if partner_row[1] == "Shadow Wolf":
                     asyncio.create_task(
                         _generate_sw_kill_list(guild, guild.id, partner_id, player_id))
@@ -8645,6 +8664,634 @@ async def spin_wheel(interaction: discord.Interaction):
 
 # ====================== GAME SUMMARY ======================
 
+
+
+
+async def _post_pregame_bloodboard(guild, guild_id: int, players: list, assignments: dict):
+    """Generate and post the pre-game Blood Board to mod-log for approval."""
+    rows     = db_get_assignments(guild_id)
+    npcs     = db_get_npcs(guild_id)
+    npc_map  = {n["npc_id"]: n["name"] for n in npcs}
+
+    # Count teams
+    village_count = sum(1 for pid, role in assignments.items()
+                        if get_team(guild_id, role) == "village")
+    wolf_count    = sum(1 for pid, role in assignments.items()
+                        if get_team(guild_id, role) == "wolf")
+    neutral_count = sum(1 for pid, role in assignments.items()
+                        if get_team(guild_id, role) == "neutral")
+    total         = len(assignments)
+
+    # Player names list (no roles)
+    player_names = []
+    for pid in assignments:
+        name = npc_map.get(pid)
+        if not name:
+            m = guild.get_member(pid)
+            name = m.display_name if m else str(pid)
+        player_names.append(name)
+
+    prompt = (
+        f"You are the narrator of a Mafia/Werewolf game set in the village of Whisperfall.\n\n"
+        f"Write the opening Blood Board — posted before the game begins, as the village gathers and "
+        f"the game is about to start.\n\n"
+        f"This is the introduction to Whisperfall. Set the scene. Establish the dread. "
+        f"Make the players feel the weight of what is about to begin.\n\n"
+        f"The village has {total} souls tonight.\n"
+        f"Among them: {village_count} villagers, {wolf_count} who hunt in darkness, "
+        f"and {neutral_count} whose allegiance remains their own secret.\n\n"
+        f"Style: Gothic, sound-driven, atmospheric. Whisperfall is a village defined by whispers — "
+        f"sounds in the walls, voices that don't belong, silences that mean everything.\n"
+        f"Do NOT reveal roles, teams, or who is who. Pure atmospheric narrative only.\n"
+        f"End with a line that makes every player feel watched. 2-3 paragraphs."
+    )
+    system = (
+        "You are a master storyteller setting the stage for a social deduction game in Whisperfall. "
+        "Your opening Blood Board should make every player feel the village close around them. "
+        "Sound, shadow, and dread. Never reveal game mechanics or roles."
+    )
+
+    narrative = await _claude(prompt, system, max_tokens=400)
+    if not narrative:
+        narrative = (
+            f"*Whisperfall has always kept its secrets close.\n"
+            f"Tonight, {total} souls gather within its borders — and not all of them are what they seem.\n"
+            f"Listen carefully. The village is already whispering.*"
+        )
+
+    # Build the full pregame post
+    header = f"🩸 **WHISPERFALL — The Game Begins**\n{'─' * 40}\n\n"
+    full_post = (
+        f"{header}{narrative}\n\n"
+        f"{'─' * 40}\n"
+        f"**👥 Players:** {total}\n"
+        f"**🏘️ Villagers:** {village_count}\n"
+        f"**🐺 Wolves:** {wolf_count}\n"
+        f"**⚖️ Neutrals:** {neutral_count}"
+    )
+
+    # Post to mod-log for approval
+    class PregameBBView(View):
+        def __init__(self):
+            super().__init__(timeout=3600)
+            edit_btn    = Button(label="✏️ Edit",               style=discord.ButtonStyle.blurple)
+            post_btn    = Button(label="✅ Post to Blood Board", style=discord.ButtonStyle.green)
+            discard_btn = Button(label="❌ Discard",             style=discord.ButtonStyle.danger)
+            edit_btn.callback    = self.on_edit
+            post_btn.callback    = self.on_post
+            discard_btn.callback = self.on_discard
+            self.add_item(edit_btn)
+            self.add_item(post_btn)
+            self.add_item(discard_btn)
+
+        async def on_edit(self, interaction: discord.Interaction):
+            class PregameEditModal(discord.ui.Modal, title="Edit Pre-Game Blood Board"):
+                text = discord.ui.TextInput(
+                    label="Narrative", style=discord.TextStyle.paragraph,
+                    max_length=3900, default=narrative)
+                async def on_submit(modal_self, modal_interaction):
+                    edited    = modal_self.text.value
+                    new_post  = (
+                        f"🩸 **WHISPERFALL — The Game Begins**\n{'─' * 40}\n\n"
+                        f"{edited}\n\n{'─' * 40}\n"
+                        f"**👥 Players:** {total}  **🏘️ Village:** {village_count}  "
+                        f"**🐺 Wolves:** {wolf_count}  **⚖️ Neutrals:** {neutral_count}"
+                    )
+                    view_new = PregameBBView()
+                    view_new._post = new_post
+                    embed_new = discord.Embed(
+                        title="🩸 Pre-Game Blood Board — Edited",
+                        description=edited[:4000], color=0x8B0000)
+                    embed_new.set_footer(text="✏️ Edited — post when ready.")
+                    await modal_interaction.response.edit_message(embed=embed_new, view=view_new)
+            await interaction.response.send_modal(PregameEditModal())
+
+        async def on_post(self, interaction: discord.Interaction):
+            post = getattr(self, "_post", full_post)
+            bb_ch = interaction.guild.get_channel(BB_CHANNEL_ID)
+            if not bb_ch:
+                return await interaction.response.send_message(
+                    "❌ Blood Board channel not found.", ephemeral=True)
+            await bb_ch.send(post)
+            await interaction.response.edit_message(
+                content=f"✅ Pre-game Blood Board posted to <#{BB_CHANNEL_ID}>.",
+                embed=None, view=None)
+
+        async def on_discard(self, interaction: discord.Interaction):
+            await interaction.response.edit_message(
+                content="❌ Pre-game Blood Board discarded.", embed=None, view=None)
+
+    embed = discord.Embed(
+        title       = "🩸 Pre-Game Blood Board — Draft",
+        description = narrative[:4000],
+        color       = 0x8B0000
+    )
+    embed.add_field(name="👥 Total",      value=str(total),          inline=True)
+    embed.add_field(name="🏘️ Village",   value=str(village_count),  inline=True)
+    embed.add_field(name="🐺 Wolves",    value=str(wolf_count),     inline=True)
+    embed.add_field(name="⚖️ Neutrals",  value=str(neutral_count),  inline=True)
+    embed.set_footer(text="Post to Village Chat or Discard.")
+
+    state  = cached_get_state(guild_id)
+    mod_ch = guild.get_channel(state.get("mod_log_channel_id") or 0)
+    if mod_ch:
+        await mod_ch.send(embed=embed, view=PregameBBView())
+
+# ====================== BLOOD BOARD ======================
+
+class BBEditModal(discord.ui.Modal, title="Edit Blood Board"):
+    narrative = discord.ui.TextInput(
+        label       = "Narrative",
+        style       = discord.TextStyle.paragraph,
+        max_length  = 3900,
+        required    = True,
+    )
+
+    def __init__(self, guild_id, current_narrative, deaths, night_num, counts):
+        super().__init__()
+        self.guild_id   = guild_id
+        self.deaths     = deaths
+        self.night_num  = night_num
+        self.counts     = counts
+        self.narrative.default = current_narrative
+
+    async def on_submit(self, interaction: discord.Interaction):
+        edited = self.narrative.value
+        # Show updated preview with new Post/Discard buttons
+        view = BloodBoardApprovalView(
+            self.guild_id, edited, self.deaths,
+            self.night_num, self.counts)
+        embed = _build_bb_embed(edited, self.deaths, self.night_num, self.counts)
+        embed.set_footer(text="✏️ Edited — review and post when ready.")
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+def _build_bb_embed(narrative, deaths, night_num, counts):
+    """Build the Blood Board embed for mod preview."""
+    embed = discord.Embed(
+        title       = f"🩸 Blood Board — Night {night_num} Draft",
+        description = narrative[:4000],
+        color       = 0x8B0000
+    )
+    embed.add_field(name="💀 Deaths",     value="\n".join(f"💀 {n}" for n in deaths) if deaths else "None", inline=False)
+    embed.add_field(name="👥 Remaining",  value=str(counts["total"]),   inline=True)
+    embed.add_field(name="🏘️ Village",   value=str(counts["village"]), inline=True)
+    embed.add_field(name="🐺 Wolves",    value=str(counts["wolf"]),    inline=True)
+    embed.add_field(name="⚖️ Neutrals",  value=str(counts["neutral"]), inline=True)
+    return embed
+
+
+def _build_bb_post(narrative, deaths, night_num, counts):
+    """Build the final formatted BB post for the channel."""
+    header = f"🩸 **BLOOD BOARD — Morning of Day {night_num + 1}**\n{'─' * 40}\n\n"
+    death_section = (
+        "\n\n**The fallen:**\n" + "\n".join(f"💀 {n}" for n in deaths)
+        if deaths else
+        "\n\n*The village woke intact. No one was taken last night.*"
+    )
+    counts_section = (
+        f"\n\n{'─' * 40}\n"
+        f"**👥 Remaining:** {counts['total']}  "
+        f"**🏘️ Village:** {counts['village']}  "
+        f"**🐺 Wolves:** {counts['wolf']}  "
+        f"**⚖️ Neutrals:** {counts['neutral']}"
+    )
+    return header + narrative + death_section + counts_section
+
+
+class BloodBoardApprovalView(View):
+    """Posted to mod-log — mod can edit, post, or discard the Blood Board."""
+    def __init__(self, guild_id: int, narrative: str, deaths: list, night_num: int, counts: dict):
+        super().__init__(timeout=7200)
+        self.guild_id  = guild_id
+        self.narrative = narrative
+        self.deaths    = deaths
+        self.night_num = night_num
+        self.counts    = counts
+
+        edit_btn    = Button(label="✏️ Edit",                style=discord.ButtonStyle.blurple)
+        post_btn    = Button(label="✅ Post to Blood Board",  style=discord.ButtonStyle.green)
+        discard_btn = Button(label="❌ Discard",              style=discord.ButtonStyle.danger)
+        edit_btn.callback    = self.on_edit
+        post_btn.callback    = self.on_post
+        discard_btn.callback = self.on_discard
+        self.add_item(edit_btn)
+        self.add_item(post_btn)
+        self.add_item(discard_btn)
+
+    async def on_edit(self, interaction: discord.Interaction):
+        modal = BBEditModal(
+            self.guild_id, self.narrative,
+            self.deaths, self.night_num, self.counts)
+        await interaction.response.send_modal(modal)
+
+    async def on_post(self, interaction: discord.Interaction):
+        bb_ch = interaction.guild.get_channel(BB_CHANNEL_ID)
+        if not bb_ch:
+            return await interaction.response.send_message(
+                "❌ Blood Board channel not found.", ephemeral=True)
+        post = _build_bb_post(self.narrative, self.deaths, self.night_num, self.counts)
+        await bb_ch.send(post)
+        await interaction.response.edit_message(
+            content=f"✅ Blood Board posted to <#{BB_CHANNEL_ID}>.",
+            embed=None, view=None)
+
+    async def on_discard(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            content="❌ Blood Board discarded.", embed=None, view=None)
+
+
+
+@tree.command(name="dayboard", description="Generate the day Blood Board narrative for mod approval")
+@is_mod()
+async def dayboard(interaction: discord.Interaction):
+    if not game_active(interaction.guild_id):
+        return await interaction.response.send_message("No active game.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+
+    guild_id  = interaction.guild_id
+    night_num = db_get_night_num(guild_id)
+    rows      = db_get_assignments(guild_id)
+    npcs      = db_get_npcs(guild_id)
+    npc_map   = {n["npc_id"]: n["name"] for n in npcs}
+
+    def get_name(pid):
+        npc = npc_map.get(pid)
+        if npc: return npc
+        m = interaction.guild.get_member(pid)
+        return m.display_name if m else str(pid)
+
+    # ── Build vote breakdown ──────────────────────────────────────────────
+    votes = db_get_day_votes(guild_id)
+    tally = {}   # target_id -> list of voter names
+    for voter_id, target_id in votes:
+        if target_id:
+            tally.setdefault(target_id, []).append(get_name(voter_id))
+
+    sorted_targets = sorted(tally.items(), key=lambda x: len(x[1]), reverse=True)
+
+    vote_lines = []
+    for target_id, voters in sorted_targets:
+        name       = get_name(target_id)
+        voter_list = ", ".join(voters)
+        vote_lines.append(f"**{name}** — {len(voters)} vote(s) from: {voter_list}")
+
+    # ── Find who was eliminated today (dead players from day phase) ───────
+    deaths = []
+    for pid, role, is_alive, _ in rows:
+        if not is_alive:
+            # Check if eliminated during day phase via log
+            recent_log = db_get_log(guild_id)
+            for _, phase, event in reversed(recent_log):
+                if f"Day {night_num}" in phase and "eliminated" in event.lower():
+                    import re
+                    match = re.search(r"\*\*(.+?)\*\*\s+eliminated", event)
+                    if match:
+                        name = match.group(1).strip()
+                        if name not in deaths:
+                            deaths.append(name)
+                    break
+
+    # ── Current alive counts after eliminations ───────────────────────────
+    counts = {
+        "total":   sum(1 for r in rows if r[2] == 1),
+        "village": sum(1 for r in rows if r[2] == 1 and get_team(guild_id, r[1]) == "village"),
+        "wolf":    sum(1 for r in rows if r[2] == 1 and get_team(guild_id, r[1]) == "wolf"),
+        "neutral": sum(1 for r in rows if r[2] == 1 and get_team(guild_id, r[1]) == "neutral"),
+    }
+
+    # ── Build Claude prompt ───────────────────────────────────────────────
+    vote_summary_text = "\n".join(vote_lines) if vote_lines else "No votes were cast."
+    death_count       = len(deaths)
+
+    tone = (
+        "heavy and final — the village has spoken and someone has paid the price" if death_count >= 1
+        else "uneasy — the vote concluded but left the village unsatisfied and divided"
+    )
+
+    prompt = (
+        f"You are the narrator of a Mafia/Werewolf game set in the village of Whisperfall.\n\n"
+        f"Write the Day Blood Board — posted after the village vote on Day {night_num}.\n\n"
+        f"This is daytime in Whisperfall. The village has gathered, pointed fingers, and made a choice. "
+        f"Unlike the night — which is defined by whispers and shadows — the day is defined by voices raised, "
+        f"accusations spoken aloud, and the terrible weight of a crowd deciding someone's fate together.\n\n"
+        f"Tone: {tone}.\n"
+        f"The vote has concluded. {death_count} player(s) were eliminated by the village today.\n"
+        f"{'The name(s) will be listed separately. Write about the act of the vote — the moment the village chose, what it felt like, what Whisperfall sounds like after a public elimination.' if death_count else 'No one was eliminated. Write about the unease of an inconclusive vote — the tension of a village that could not agree, and what that silence means.'}"
+        f"\n\nDo NOT reveal roles, team affiliations, or game mechanics.\n"
+        f"Do NOT use the word wolf or werewolf.\n"
+        f"Whisperfall is a village of sounds — even in daylight, the whispers never fully stop.\n"
+        f"2-3 paragraphs. End on something that makes players dread tomorrow night."
+    )
+
+    system = (
+        "You are a master storyteller writing day phase announcements for a social deduction game "
+        "set in Whisperfall. Daytime writing is louder than night — voices, crowds, accusations — "
+        "but Whisperfall's whispers persist even in sunlight. "
+        "Never reveal game mechanics, roles, or exact identities. Pure atmospheric narrative."
+    )
+
+    narrative = await _claude(prompt, system, max_tokens=500)
+    if not narrative:
+        narrative = (
+            f"*The village square of Whisperfall had not been this loud in years.\n"
+            f"Voices crossed over one another. Names were spoken like accusations.\n"
+            f"And when it was done, the crowd dispersed in silence — each person wondering "
+            f"if they had just helped the village, or handed a victory to something far worse.*"
+        )
+
+    # ── Build mod-log embed ───────────────────────────────────────────────
+    embed = discord.Embed(
+        title       = f"☀️ Day Blood Board — Day {night_num} Draft",
+        description = narrative[:4000],
+        color       = 0xE67E22
+    )
+    embed.add_field(
+        name  = "🗳️ Vote Results",
+        value = "\n".join(vote_lines)[:1024] if vote_lines else "No votes cast.",
+        inline= False
+    )
+    embed.add_field(
+        name  = "💀 Eliminated",
+        value = "\n".join(f"💀 {n}" for n in deaths) if deaths else "None",
+        inline= False
+    )
+    embed.add_field(name="👥 Remaining", value=str(counts["total"]),   inline=True)
+    embed.add_field(name="🏘️ Village",  value=str(counts["village"]), inline=True)
+    embed.add_field(name="🐺 Wolves",   value=str(counts["wolf"]),    inline=True)
+    embed.add_field(name="⚖️ Neutrals", value=str(counts["neutral"]), inline=True)
+    embed.set_footer(text="Review, edit if needed, then post to Blood Board channel.")
+
+    view = DayBoardApprovalView(
+        guild_id, narrative, deaths, vote_lines, night_num, counts)
+
+    state_mod = cached_get_state(guild_id)
+    mod_ch    = interaction.guild.get_channel(state_mod.get("mod_log_channel_id") or 0)
+    if mod_ch:
+        await mod_ch.send(embed=embed, view=view)
+
+    await interaction.followup.send(
+        "✅ Day Blood Board generated and posted to mod-log for review.", ephemeral=True)
+
+
+class DayBoardEditModal(discord.ui.Modal, title="Edit Day Blood Board"):
+    narrative = discord.ui.TextInput(
+        label      = "Narrative",
+        style      = discord.TextStyle.paragraph,
+        max_length = 3900,
+        required   = True,
+    )
+
+    def __init__(self, guild_id, current_narrative, deaths, vote_lines, night_num, counts):
+        super().__init__()
+        self.guild_id   = guild_id
+        self.deaths     = deaths
+        self.vote_lines = vote_lines
+        self.night_num  = night_num
+        self.counts     = counts
+        self.narrative.default = current_narrative
+
+    async def on_submit(self, interaction: discord.Interaction):
+        edited = self.narrative.value
+        view   = DayBoardApprovalView(
+            self.guild_id, edited, self.deaths,
+            self.vote_lines, self.night_num, self.counts)
+        embed  = _build_dayboard_embed(
+            edited, self.deaths, self.vote_lines, self.night_num, self.counts)
+        embed.set_footer(text="✏️ Edited — review and post when ready.")
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+def _build_dayboard_embed(narrative, deaths, vote_lines, night_num, counts):
+    embed = discord.Embed(
+        title       = f"☀️ Day Blood Board — Day {night_num} Draft",
+        description = narrative[:4000],
+        color       = 0xE67E22
+    )
+    embed.add_field(
+        name  = "🗳️ Vote Results",
+        value = "\n".join(vote_lines)[:1024] if vote_lines else "No votes cast.",
+        inline= False
+    )
+    embed.add_field(
+        name  = "💀 Eliminated",
+        value = "\n".join(f"💀 {n}" for n in deaths) if deaths else "None",
+        inline= False
+    )
+    embed.add_field(name="👥 Remaining", value=str(counts["total"]),   inline=True)
+    embed.add_field(name="🏘️ Village",  value=str(counts["village"]), inline=True)
+    embed.add_field(name="🐺 Wolves",   value=str(counts["wolf"]),    inline=True)
+    embed.add_field(name="⚖️ Neutrals", value=str(counts["neutral"]), inline=True)
+    return embed
+
+
+def _build_dayboard_post(narrative, deaths, vote_lines, night_num, counts):
+    header       = f"☀️ **DAY BLOOD BOARD — Day {night_num}**\n{'─' * 40}\n\n"
+    death_section = (
+        "\n\n**The eliminated:**\n" + "\n".join(f"💀 {n}" for n in deaths)
+        if deaths else
+        "\n\n*The village reached no final decision. No one was taken today.*"
+    )
+    vote_section = (
+        "\n\n**Vote breakdown:**\n" + "\n".join(vote_lines)
+        if vote_lines else ""
+    )
+    counts_section = (
+        f"\n\n{'─' * 40}\n"
+        f"**👥 Remaining:** {counts['total']}  "
+        f"**🏘️ Village:** {counts['village']}  "
+        f"**🐺 Wolves:** {counts['wolf']}  "
+        f"**⚖️ Neutrals:** {counts['neutral']}"
+    )
+    return header + narrative + death_section + vote_section + counts_section
+
+
+class DayBoardApprovalView(View):
+    """Posted to mod-log — mod can edit, post, or discard the Day Blood Board."""
+    def __init__(self, guild_id, narrative, deaths, vote_lines, night_num, counts):
+        super().__init__(timeout=7200)
+        self.guild_id   = guild_id
+        self.narrative  = narrative
+        self.deaths     = deaths
+        self.vote_lines = vote_lines
+        self.night_num  = night_num
+        self.counts     = counts
+
+        edit_btn    = Button(label="✏️ Edit",                style=discord.ButtonStyle.blurple)
+        post_btn    = Button(label="✅ Post to Blood Board",  style=discord.ButtonStyle.green)
+        discard_btn = Button(label="❌ Discard",              style=discord.ButtonStyle.danger)
+        edit_btn.callback    = self.on_edit
+        post_btn.callback    = self.on_post
+        discard_btn.callback = self.on_discard
+        self.add_item(edit_btn)
+        self.add_item(post_btn)
+        self.add_item(discard_btn)
+
+    async def on_edit(self, interaction: discord.Interaction):
+        modal = DayBoardEditModal(
+            self.guild_id, self.narrative, self.deaths,
+            self.vote_lines, self.night_num, self.counts)
+        await interaction.response.send_modal(modal)
+
+    async def on_post(self, interaction: discord.Interaction):
+        bb_ch = interaction.guild.get_channel(BB_CHANNEL_ID)
+        if not bb_ch:
+            return await interaction.response.send_message(
+                "❌ Blood Board channel not found.", ephemeral=True)
+        post = _build_dayboard_post(
+            self.narrative, self.deaths, self.vote_lines,
+            self.night_num, self.counts)
+        await bb_ch.send(post)
+        await interaction.response.edit_message(
+            content=f"✅ Day Blood Board posted to <#{BB_CHANNEL_ID}>.",
+            embed=None, view=None)
+
+    async def on_discard(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            content="❌ Day Blood Board discarded.", embed=None, view=None)
+
+@tree.command(name="bloodboard", description="Generate the nightly Blood Board narrative for mod approval")
+@is_mod()
+async def bloodboard(interaction: discord.Interaction):
+    if not game_active(interaction.guild_id):
+        return await interaction.response.send_message("No active game.", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
+
+    guild_id  = interaction.guild_id
+    night_num = db_get_night_num(guild_id)
+    actions   = db_get_night_actions(guild_id, night_num)
+    rows      = db_get_assignments(guild_id)
+    npcs      = db_get_npcs(guild_id)
+    npc_map   = {n["npc_id"]: n["name"] for n in npcs}
+
+    def get_name(pid):
+        npc = npc_map.get(pid)
+        if npc: return npc
+        m = interaction.guild.get_member(pid)
+        return m.display_name if m else str(pid)
+
+    def get_role(pid):
+        r = next((r for r in rows if r[0] == pid), None)
+        return r[1] if r else "Unknown"
+
+    # ── Build action summary for Claude ──────────────────────────────────
+    action_map = {}
+    for actor_id, action_type, target_id in actions:
+        if not action_type.startswith("_"):
+            action_map.setdefault(action_type, []).append((actor_id, target_id))
+
+    # Find who actually died this night from the game log
+    deaths = []
+    recent_log = db_get_log(guild_id)
+    for _, phase, event in reversed(recent_log):
+        if f"Night {night_num}" in phase or f"Day {night_num}" in phase:
+            if "eliminated" in event.lower() or "killed" in event.lower():
+                # Extract name from log entry
+                import re
+                match = re.search(r"\*\*(.+?)\*\*\s+eliminated", event)
+                if match:
+                    deaths.append(match.group(1).strip())
+
+    # Build context for Claude to write the narrative
+    action_hints = []
+    if "wolf" in str(action_map).lower() or any(
+        t in action_map for t in ["wolf_kill", "crazed_wolf_1", "echo_stalk"]):
+        action_hints.append("wolves coordinated and moved through the village")
+    if any(t in action_map for t in ["doctor_save", "surgeon_save", "bodyguard_guard", "huntsman_protect"]):
+        action_hints.append("at least one villager was protected from harm")
+    if "witch_save" in action_map:
+        action_hints.append("a mysterious intervention saved someone from death")
+    if "witch_kill" in action_map:
+        action_hints.append("something sinister and quiet claimed a life — no struggle, no sound")
+    if "seer" in action_map:
+        action_hints.append("someone spent the night watching, seeking truth in the darkness")
+    if "medium" in action_map:
+        action_hints.append("someone communed with forces beyond the living to seek alignment")
+    if "cupid" in str(action_map):
+        action_hints.append("two souls were bound together in the night, unaware of what ties them")
+    if "hermit" in action_map:
+        action_hints.append("someone sought refuge and was hidden from the chaos")
+    if "bloodletter" in action_map:
+        action_hints.append("a dark marking was left on someone — invisible to most eyes")
+    if "alpha" in action_map or "elite_alpha" in action_map:
+        action_hints.append("something in the village shifted — an allegiance tested, a soul tempted")
+    if "wolf_pup" in action_map:
+        action_hints.append("one villager found their usual instincts dulled, as if something blocked them")
+    if "agitator" in action_map:
+        action_hints.append("an unseen hand stirred unrest, setting tomorrow's chaos in motion")
+
+    death_count  = len(deaths)
+    activity_level = len(action_map)
+
+    tone = "dark and heavy" if death_count >= 2 else (
+           "tense and foreboding" if death_count == 1 else
+           "eerily quiet and suspicious")
+
+    activity_desc = "many shadows moved through the village" if activity_level > 6 else (
+                    "several presences stirred in the dark" if activity_level > 3 else
+                    "the night was unusually still, yet not entirely empty")
+
+    prompt = (
+        f"You are the narrator of a Mafia/Werewolf game set in the village of Whisperfall.\n\n"
+        f"Write the Blood Board — a morning announcement read aloud to the village after Night {night_num}.\n\n"
+        f"Style: Gothic, atmospheric, literary. Like a dark fairy tale or a village journal entry.\n"
+        f"The village of Whisperfall is defined by sound — whispers in the walls, voices in the dark, "
+        f"footsteps that shouldn't exist, silences that speak louder than words. "
+        f"Every Blood Board should lean into sound: what was heard, what went quiet, what the wind carried.\n"
+        f"Tone for tonight: {tone}.\n"
+        f"Activity in the night: {activity_desc}.\n"
+        f"Hints to weave in naturally (do NOT state these directly — translate them into atmospheric story):\n"
+        + "\n".join(f"- {h}" for h in action_hints) +
+        f"\n\nDeaths tonight: {death_count} villager(s) perished.\n"
+        f"{'Names will be listed separately — describe the discovery of the body/bodies with physical and environmental clues. No names, no roles.' if deaths else 'No one died tonight. Write about the village waking to unexpected survival — relief mixed with dread about what was prevented and why.'}"
+        f"\n\nLength: 3-5 paragraphs. End on a line that will linger with the players.\n"
+        f"Do NOT reveal any role names, abilities, or game mechanics. Pure narrative only.\n"
+        f"Do NOT use the word 'wolf' or 'werewolf'. Refer to threats as 'the darkness', 'the hunters', 'the shadows', 'those who move unseen' etc."
+    )
+
+    system = (
+        "You are a master storyteller writing atmospheric morning announcements for a social deduction game "
+        "set in the village of Whisperfall. Your writing is rooted in sound — whispers, silences, footsteps, "
+        "voices that shouldn't be there, sounds that stop too suddenly. "
+        "Every Blood Board should make players feel like they are straining to hear something just out of reach. "
+        "Write with dread, restraint, and precision. Every sentence should make players lean forward. "
+        "Never reveal game mechanics, roles, or exact events — only sounds, shadows, and impressions."
+    )
+
+    narrative = await _claude(prompt, system, max_tokens=600)
+    if not narrative:
+        narrative = (
+            f"*Dawn crept into Whisperfall on the morning of Day {night_num + 1}.\n"
+            f"The village stirred slowly, each soul listening before they spoke.\n"
+            f"The night had passed — but not quietly. Something had moved through these streets, "
+            f"and the echoes of it still clung to the morning air.*"
+        )
+
+    # Format as a proper blood board post
+    header = f"🩸 **BLOOD BOARD — Morning of Day {night_num + 1}**\n{'─' * 40}\n\n"
+    full_narrative = header + narrative
+
+    # Get current alive counts for the footer
+    alive_rows = db_get_assignments(guild_id)
+    counts = {
+        "total":   sum(1 for r in alive_rows if r[2] == 1),
+        "village": sum(1 for r in alive_rows if r[2] == 1 and get_team(guild_id, r[1]) == "village"),
+        "wolf":    sum(1 for r in alive_rows if r[2] == 1 and get_team(guild_id, r[1]) == "wolf"),
+        "neutral": sum(1 for r in alive_rows if r[2] == 1 and get_team(guild_id, r[1]) == "neutral"),
+    }
+
+    # Post to mod-log for approval with edit button
+    view  = BloodBoardApprovalView(guild_id, narrative, deaths, night_num, counts)
+    embed = _build_bb_embed(narrative, deaths, night_num, counts)
+    embed.set_footer(text="Review, edit if needed, then post to Blood Board channel.")
+
+    state_mod = cached_get_state(guild_id)
+    mod_ch    = interaction.guild.get_channel(state_mod.get("mod_log_channel_id") or 0)
+    if mod_ch:
+        await mod_ch.send(embed=embed, view=view)
+
+    await interaction.followup.send(
+        "✅ Blood Board generated and posted to mod-log for review.", ephemeral=True)
 
 @tree.command(name="game_recap", description="Post a full end-of-game recap embed to village-chat")
 @is_mod()
