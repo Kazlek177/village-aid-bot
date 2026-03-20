@@ -1411,10 +1411,7 @@ def is_mod():
 def game_active(guild_id):
     # Always check DB directly — cache can be stale if game just launched
     state = db_get_state(guild_id)
-    result = bool(state and state.get("category_id"))
-    if not result:
-        print(f"[game_active] FALSE for guild {guild_id} — state={state}")
-    return result
+    return bool(state and state.get("category_id"))
 
 async def post_mod_log(guild, message: str = "", embed=None):
     # Always hit DB fresh — avoids stale cache routing messages to wrong channel
