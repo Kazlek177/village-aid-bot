@@ -21,9 +21,12 @@ tree = app_commands.CommandTree(client)
 
 # ====================== DATABASE ======================
 # Use /app/data/ on Railway (persistent volume) or current directory locally
-_DB_DIR = "/app/data" if os.path.isdir("/app") else "."
+# Always use /app/data on Railway — create it if it doesn't exist yet
+# This ensures the volume mount is used even if the directory wasn't pre-created
+_DB_DIR = "/app/data" if os.environ.get("RAILWAY_ENVIRONMENT") or os.path.isdir("/app") else "."
 os.makedirs(_DB_DIR, exist_ok=True)
 DB_FILE = os.path.join(_DB_DIR, "mafia_game.db")
+print(f"[DB] Using database at: {DB_FILE}")
 
 # Hardcoded village chat channel — not created by bot
 VILLAGE_CHAT_ID = 1482889389519409202
@@ -4215,26 +4218,41 @@ async def remove_role(interaction: discord.Interaction, name: str):
 
 @tree.command(name="list_roles", description="Show all saved game roles")
 async def list_roles(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     roles = db_load_roles(interaction.guild_id)
     if not roles:
-        return await interaction.response.send_message("No roles saved yet. Use `/add_role`.", ephemeral=True)
+        return await interaction.followup.send("No roles saved yet. Use `/add_role`.", ephemeral=True)
+
     wolf_roles    = [r for r in roles if r["team"] == "wolf"]
     village_roles = [r for r in roles if r["team"] == "village"]
     neutral_roles = [r for r in roles if r["team"] == "neutral"]
+
+    def make_chunks(role_list, label):
+        """Split role list into 1024-char chunks as separate fields."""
+        fields = []
+        chunk  = ""
+        count  = 0
+        for r in role_list:
+            line = f"**{r['name']}** ×{r['count']}\n"
+            if len(chunk) + len(line) > 1020:
+                fields.append((f"{label} ({count})", chunk.strip()))
+                chunk = ""
+                count = 0
+            chunk += line
+            count += 1
+        if chunk:
+            fields.append((label, chunk.strip()))
+        return fields
+
     embed = discord.Embed(title="📋 Saved Game Roles", color=0x5865F2)
-    if village_roles:
-        embed.add_field(name="🏘️ Village", value="\n".join(
-            f"**{r['name']}** ×{r['count']}\n> {r['description'] or '*No description*'}"
-            for r in village_roles), inline=False)
-    if wolf_roles:
-        embed.add_field(name="🐺 Wolf", value="\n".join(
-            f"**{r['name']}** ×{r['count']}\n> {r['description'] or '*No description*'}"
-            for r in wolf_roles), inline=False)
-    if neutral_roles:
-        embed.add_field(name="⚖️ Neutral", value="\n".join(
-            f"**{r['name']}** ×{r['count']}\n> {r['description'] or '*No description*'}"
-            for r in neutral_roles), inline=False)
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    for name, value in make_chunks(village_roles, "🏘️ Village"):
+        embed.add_field(name=name, value=value, inline=False)
+    for name, value in make_chunks(wolf_roles, "🐺 Wolf"):
+        embed.add_field(name=name, value=value, inline=False)
+    for name, value in make_chunks(neutral_roles, "⚖️ Neutral"):
+        embed.add_field(name=name, value=value, inline=False)
+
+    await interaction.followup.send(embed=embed, ephemeral=True)
 
 # ====================== START GAME ======================
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -5127,6 +5145,205 @@ async def bind(interaction: discord.Interaction, player1: discord.Member, player
         f"If either dies, the other will be automatically eliminated.")
     await interaction.response.send_message(
         f"✅ **{player1.display_name}** and **{player2.display_name}** are now bound.", ephemeral=True)
+
+
+# ====================== CLAIM CHANNELS ======================
+
+class ClaimChannelView(View):
+    """Persistent view in claim channels — add or remove players."""
+    def __init__(self, guild_id, channel_id, owner_id):
+        super().__init__(timeout=None)
+        self.guild_id   = guild_id
+        self.channel_id = channel_id
+        self.owner_id   = owner_id
+
+        add_btn = Button(label="➕ Add Player", style=discord.ButtonStyle.green)
+        rem_btn = Button(label="➖ Remove Player", style=discord.ButtonStyle.danger)
+        add_btn.callback = self.on_add
+        rem_btn.callback = self.on_remove
+        self.add_item(add_btn)
+        self.add_item(rem_btn)
+
+    async def on_add(self, interaction: discord.Interaction):
+        # Only channel participants can add
+        ch = interaction.guild.get_channel(self.channel_id)
+        if not ch:
+            return await interaction.response.send_message("❌ Channel not found.", ephemeral=True)
+        # Check if user has access
+        perms = ch.permissions_for(interaction.user)
+        if not perms.view_channel:
+            return await interaction.response.send_message("❌ You are not in this claim.", ephemeral=True)
+
+        await interaction.response.send_modal(AddPlayerModal(self.guild_id, self.channel_id))
+
+    async def on_remove(self, interaction: discord.Interaction):
+        ch = interaction.guild.get_channel(self.channel_id)
+        if not ch:
+            return await interaction.response.send_message("❌ Channel not found.", ephemeral=True)
+        perms = ch.permissions_for(interaction.user)
+        if not perms.view_channel:
+            return await interaction.response.send_message("❌ You are not in this claim.", ephemeral=True)
+
+        await interaction.response.send_modal(RemovePlayerModal(self.guild_id, self.channel_id))
+
+
+class AddPlayerModal(discord.ui.Modal, title="Add a player to this claim"):
+    name = discord.ui.TextInput(
+        label="Player name",
+        placeholder="Type their display name...",
+        max_length=100
+    )
+
+    def __init__(self, guild_id, channel_id):
+        super().__init__()
+        self.guild_id   = guild_id
+        self.channel_id = channel_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        search = self.name.value.strip().lower()
+        ch     = interaction.guild.get_channel(self.channel_id)
+        if not ch:
+            return await interaction.response.send_message("❌ Channel not found.", ephemeral=True)
+
+        # Find alive player by display name
+        rows   = db_get_assignments(self.guild_id)
+        npcs   = db_get_npcs(self.guild_id)
+        npc_map = {n["npc_id"]: n["name"] for n in npcs}
+
+        target_member = None
+        for r in rows:
+            if r[2] != 1:
+                continue
+            m    = interaction.guild.get_member(r[0])
+            name = npc_map.get(r[0]) or (m.display_name if m else "")
+            if search in name.lower():
+                target_member = m
+                break
+
+        if not target_member:
+            return await interaction.response.send_message(
+                f"❌ Could not find alive player matching **{self.name.value}**.", ephemeral=True)
+
+        # Check not already in channel
+        existing_perms = ch.permissions_for(target_member)
+        if existing_perms.view_channel:
+            return await interaction.response.send_message(
+                f"❌ **{target_member.display_name}** already has access.", ephemeral=True)
+
+        await ch.set_permissions(target_member,
+            view_channel=True, send_messages=True, read_messages=True)
+        await ch.send(
+            f"🎭 **{target_member.mention}** has been added to this claim.")
+        await post_mod_log(interaction.guild,
+            f"🎭 **Claim channel** — player added\n"
+            f"**Channel:** {ch.name}\n"
+            f"**Added by:** {interaction.user.display_name}\n"
+            f"**Added:** {target_member.display_name}")
+        await interaction.response.send_message(
+            f"✅ **{target_member.display_name}** added.", ephemeral=True)
+
+
+class RemovePlayerModal(discord.ui.Modal, title="Remove a player from this claim"):
+    name = discord.ui.TextInput(
+        label="Player name",
+        placeholder="Type their display name...",
+        max_length=100
+    )
+
+    def __init__(self, guild_id, channel_id):
+        super().__init__()
+        self.guild_id   = guild_id
+        self.channel_id = channel_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        search = self.name.value.strip().lower()
+        ch     = interaction.guild.get_channel(self.channel_id)
+        if not ch:
+            return await interaction.response.send_message("❌ Channel not found.", ephemeral=True)
+
+        # Cannot remove yourself or mods
+        target_member = None
+        for m in interaction.guild.members:
+            if search in m.display_name.lower() and m.id != interaction.user.id:
+                ch_perms = ch.permissions_for(m)
+                if ch_perms.view_channel and not m.bot:
+                    target_member = m
+                    break
+
+        if not target_member:
+            return await interaction.response.send_message(
+                f"❌ Could not find **{self.name.value}** in this channel.", ephemeral=True)
+
+        await ch.set_permissions(target_member, overwrite=None)
+        await ch.send(f"🎭 **{target_member.display_name}** has been removed from this claim.")
+        await post_mod_log(interaction.guild,
+            f"🎭 **Claim channel** — player removed\n"
+            f"**Channel:** {ch.name}\n"
+            f"**Removed by:** {interaction.user.display_name}\n"
+            f"**Removed:** {target_member.display_name}")
+        await interaction.response.send_message(
+            f"✅ **{target_member.display_name}** removed.", ephemeral=True)
+
+
+@tree.command(name="claim", description="Open a private claim channel with another player")
+@app_commands.describe(player="The player you want to open a private claim with")
+async def claim(interaction: discord.Interaction, player: discord.Member):
+    if not game_active(interaction.guild_id):
+        return await interaction.response.send_message("No active game.", ephemeral=True)
+    if player.id == interaction.user.id:
+        return await interaction.response.send_message(
+            "❌ You cannot open a claim with yourself.", ephemeral=True)
+    if player.bot:
+        return await interaction.response.send_message(
+            "❌ You cannot open a claim with a bot.", ephemeral=True)
+
+    await interaction.response.defer(ephemeral=True)
+
+    state    = cached_get_state(interaction.guild_id)
+    category = interaction.guild.get_channel(state.get("category_id") or 0)
+    if not category:
+        return await interaction.followup.send(
+            "❌ Game category not found.", ephemeral=True)
+
+    everyone  = interaction.guild.default_role
+    bot_me    = interaction.guild.me
+    mod_role  = interaction.guild.get_role(state.get("mod_role_id") or 0)
+    spec_role = interaction.guild.get_role(state.get("spectator_role_id") or 0)
+    font      = get_guild_font(interaction.guild_id)
+
+    # Channel name from both player names
+    n1 = interaction.user.display_name.lower().replace(" ", "-")[:15]
+    n2 = player.display_name.lower().replace(" ", "-")[:15]
+    ch_name = ch_name(f"claim-{n1}-{n2}", font, "🎭")
+
+    ch_ow = {
+        everyone:         discord.PermissionOverwrite(view_channel=False),
+        bot_me:           discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True),
+        interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True),
+        player:           discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True),
+    }
+    if mod_role:
+        ch_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
+    if spec_role:
+        ch_ow[spec_role] = discord.PermissionOverwrite(view_channel=True, send_messages=False, read_messages=True)
+
+    ch = await category.create_text_channel(ch_name, overwrites=ch_ow)
+
+    # Post welcome message with persistent add/remove buttons
+    view = ClaimChannelView(interaction.guild_id, ch.id, interaction.user.id)
+    await ch.send(
+        f"🎭 **Private Claim** — {interaction.user.mention} & {player.mention}\n"
+        f"*This conversation is private. Only you two and mods can see it.*\n"
+        f"*Choose your words carefully. Trust is earned, not given.*",
+        view=view)
+
+    await post_mod_log(interaction.guild,
+        f"🎭 **Claim channel opened**\n"
+        f"**Between:** {interaction.user.display_name} & {player.display_name}\n"
+        f"**Channel:** {ch.mention}")
+
+    await interaction.followup.send(
+        f"✅ Claim channel created — {ch.mention}", ephemeral=True)
 
 @tree.command(name="transfer_mod", description="Give mod control to another player")
 @is_mod()
