@@ -64,9 +64,31 @@ VILLAGE_CHAT_ID = 1482889389519409202
 # Hardcoded Blood Board channel — mods post approved BBs here
 BB_CHANNEL_ID = 1481320638567419988
 
+import signal as _signal
+
+
+def _handle_sigterm(signum, frame):
+    """Graceful shutdown on Railway SIGTERM — close DB connections cleanly."""
+    print("[shutdown] SIGTERM received — shutting down gracefully", flush=True)
+    try:
+        # Final DB sync
+        conn = sqlite3.connect(DB_FILE)
+        conn.execute("PRAGMA wal_checkpoint(FULL)")
+        conn.close()
+    except Exception:
+        pass
+    import sys
+    sys.exit(0)
+
+
+_signal.signal(_signal.SIGTERM, _handle_sigterm)
+
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
+    conn.execute("PRAGMA journal_mode=WAL")  # Allow concurrent reads during writes
+    conn.execute("PRAGMA synchronous=NORMAL")  # Faster writes, still safe
+    conn.execute("PRAGMA busy_timeout=5000")  # Wait up to 5s on lock instead of failing
     c = conn.cursor()
 
     c.execute('''CREATE TABLE IF NOT EXISTS game_roles
@@ -1798,7 +1820,8 @@ def db_update_npc_suspicions(guild_id, npc_id, suspicions: list):
 
 def db_update_npc_chat_history(guild_id, npc_id, history: list):
     import json
-    # No hard truncation — compression handles memory management
+    # Hard cap at 50 messages — compression should keep it lower but this is the safety net
+    history = history[-50:]
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("UPDATE npcs SET chat_history=? WHERE guild_id=? AND npc_id=?",
@@ -2018,6 +2041,7 @@ _roles_cache = {}
 
 def invalidate_cache(guild_id):
     _state_cache.pop(guild_id, None)
+    invalidate_role_info_cache(guild_id)
     _roles_cache.pop(guild_id, None)
 
 
@@ -2068,14 +2092,28 @@ NIGHT_PASSIVE_ROLES = {
 
 
 def get_role_info(guild_id, role_name):
-    for r in cached_load_roles(guild_id):
-        if r["name"] == role_name:
-            return r
-    return {"name": role_name, "description": "", "count": 1, "team": "village"}
+    # Use dict lookup instead of linear scan
+    roles = cached_load_roles(guild_id)
+    if not hasattr(get_role_info, "_cache") or get_role_info._cache.get(guild_id) is None:
+        get_role_info._cache = getattr(get_role_info, "_cache", {})
+    cache = get_role_info._cache
+    if guild_id not in cache:
+        cache[guild_id] = {r["name"]: r for r in roles}
+    # Rebuild if cache is stale (role count changed)
+    if len(cache[guild_id]) != len(roles):
+        cache[guild_id] = {r["name"]: r for r in roles}
+    return cache[guild_id].get(role_name,
+                               {"name": role_name, "description": "", "count": 1, "team": "village"})
 
 
 def get_team(guild_id, role_name):
     return get_role_info(guild_id, role_name).get("team", "village")
+
+
+def invalidate_role_info_cache(guild_id):
+    """Call when roles are added/removed."""
+    cache = getattr(get_role_info, "_cache", {})
+    cache.pop(guild_id, None)
 
 
 # Fast in-memory mod role cache — populated by /setup_roles, never hits DB
@@ -2086,24 +2124,12 @@ def is_mod():
     async def predicate(interaction: discord.Interaction):
         if interaction.user.guild_permissions.administrator:
             return True
-        # Always hit DB fresh
         state = db_get_state(interaction.guild_id) or {}
         role_id = state.get("mod_role_id")
         if not role_id:
-            print(f"[is_mod] FAIL — no mod_role_id in DB for guild {interaction.guild_id}")
             return False
-        _mod_role_cache[interaction.guild_id] = role_id
-        # Fetch member fresh from Discord so roles are never stale
-        try:
-            member = await interaction.guild.fetch_member(interaction.user.id)
-            print(f"[is_mod] fetched member {member} roles={[r.id for r in member.roles]} looking for {role_id}")
-        except Exception as e:
-            print(f"[is_mod] fetch_member failed: {e} — falling back to interaction.user")
-            member = interaction.user
-        if any(r.id == role_id for r in member.roles):
-            return True
-        print(f"[is_mod] FAIL — role {role_id} not in member roles {[r.id for r in member.roles]}")
-        return False
+        # Use interaction.user.roles — always fresh for slash command interactions
+        return any(r.id == role_id for r in interaction.user.roles)
 
     return app_commands.check(predicate)
 
@@ -4163,8 +4189,6 @@ async def _compress_npc_memory(guild_id: int, npc: dict):
         if new_summary:
             db_update_npc_memory(guild_id, npc["npc_id"], new_summary)
             db_update_npc_chat_history(guild_id, npc["npc_id"], to_keep)
-            print(f"[NPC Memory] Compressed memory for {npc['name']} "
-                  f"({len(to_compress)} messages → summary)")
     except Exception as e:
         print(f"[NPC Memory] Compression failed for {npc['name']}: {e}")
 
@@ -4173,7 +4197,7 @@ async def _maybe_compress_memory(guild_id: int, npc_id: int):
     """Check if compression is needed and run it asynchronously."""
     npc = db_get_npc(guild_id, npc_id)
     if npc and len(npc.get("chat_history", [])) >= 30:
-        asyncio.create_task(_compress_npc_memory(guild_id, npc))
+        safe_task(_compress_npc_memory(guild_id, npc), "compress_memory")
 
 
 # ====================== NPC SYSTEM ======================
@@ -4472,10 +4496,10 @@ async def _npc_respond(guild, guild_id: int, npc: dict, trigger_message: str,
     _npc_last_spoke[(guild_id, npc["npc_id"])] = int(_tr.time())
 
     # Trigger memory compression if history is getting long
-    asyncio.create_task(_maybe_compress_memory(guild_id, npc["npc_id"]))
+    safe_task(_maybe_compress_memory(guild_id, npc["npc_id"]), "maybe_compress")
 
     # Update suspicions based on response (async, best-effort)
-    asyncio.create_task(_update_npc_suspicions(guild, guild_id, npc, trigger_message, author_name, response))
+    safe_task(_update_npc_suspicions(guild, guild_id, npc, trigger_message, author_name, response), "update_suspicions")
 
 
 async def _update_npc_suspicions(guild, guild_id, npc, message, author, response):
@@ -4943,7 +4967,7 @@ async def add_npc(interaction: discord.Interaction):
 
     await refresh_player_list(interaction.guild)
     # Start proactive chat loop for this NPC
-    asyncio.create_task(_npc_proactive_loop(interaction.guild, interaction.guild_id))
+    safe_task(_npc_proactive_loop(interaction.guild, interaction.guild_id), "npc_proactive")
     safe_task(_npc_idle_check_loop(interaction.guild, interaction.guild_id), "npc_idle")
     tell_idx = abs(npc_id) % len(NPC_TELLS)
     tell_desc = NPC_TELLS[tell_idx]["tell"]
@@ -5720,10 +5744,10 @@ async def _run_start_night(guild, guild_id, night_num, duration, state):
 
     # Insomniac hint on odd nights >= 3
     if night_num >= 3 and night_num % 2 == 1:
-        asyncio.create_task(_send_insomniac_hint(guild, guild_id, night_num))
+        safe_task(_send_insomniac_hint(guild, guild_id, night_num), "insomniac_hint")
 
     # NPC night farewell
-    asyncio.create_task(_npc_night_farewell(guild, guild_id))
+    safe_task(_npc_night_farewell(guild, guild_id), "npc_farewell")
 
     # Wolf NPCs coordinate in den at night start
     wolf_npcs_coord = [n for n in db_get_npcs(guild_id)
@@ -5742,7 +5766,7 @@ async def _run_start_night(guild, guild_id, night_num, duration, state):
                 await _npc_night_action(guild, guild_id, npc, night_num)
                 await asyncio.sleep(random.uniform(5, 15))
 
-    asyncio.create_task(_run_npc_night_actions())
+    safe_task(_run_npc_night_actions(), "npc_night_actions")
 
     await log_event(guild, f"Night {night_num}", f"🌙 Night {night_num} began ({mins} min timer)")
     await post_mod_log(guild, f"🌙 **Night {night_num}** started. Duration: {mins} min.")
@@ -5864,7 +5888,7 @@ async def on_ready():
             npcs = db_get_npcs(guild.id)
             alive_npcs = [n for n in npcs if n["is_alive"]]
             if alive_npcs:
-                asyncio.create_task(_npc_proactive_loop(guild, guild.id))
+                safe_task(_npc_proactive_loop(guild, guild.id), "npc_proactive_restore")
                 safe_task(_npc_idle_check_loop(guild, guild.id), "npc_idle_restore")
                 print(f"Resumed NPC proactive loop ({len(alive_npcs)} NPCs)")
 
@@ -6044,6 +6068,10 @@ async def on_message(message: discord.Message):
     if not message.guild:
         return
 
+    # Early return if no game active — avoids all DB queries for non-game messages
+    if not game_active(message.guild.id):
+        return
+
     state = cached_get_state(message.guild.id)
 
     # ── Speech enforcement — runs for any message in village-chat ─────────
@@ -6053,14 +6081,13 @@ async def on_message(message: discord.Message):
         rows_speech = db_get_assignments(message.guild.id)
         sender_row = next((r for r in rows_speech if r[0] == message.author.id and r[2] == 1), None)
         if sender_row:
-            asyncio.create_task(
-                check_speech_violation(message, sender_row[1], message.guild.id))
+            safe_task(check_speech_violation(message, sender_row[1], message.guild.id), "speech_check")
 
     # Check if message is in an NPC private channel (mod talking to NPC directly)
     npcs_all = db_get_npcs(message.guild.id)
     npc_in_ch = next((n for n in npcs_all if n["channel_id"] == message.channel.id and n["is_alive"]), None)
     if npc_in_ch:
-        asyncio.create_task(_npc_private_respond(message.guild, message.guild.id, npc_in_ch, message))
+        safe_task(_npc_private_respond(message.guild, message.guild.id, npc_in_ch, message), "npc_private_respond")
         return
 
     # Accept hardcoded village chat OR the DB-stored channel id
@@ -6185,7 +6212,7 @@ async def on_message(message: discord.Message):
                                     author_name, text, message.channel), "npc_followup")
 
         if should_respond:
-            asyncio.create_task(_npc_respond(
+            safe_task(_npc_respond(
                 message.guild, message.guild.id, npc, text, author_name, message.channel))
             await asyncio.sleep(random.uniform(2, 5))
 
@@ -7260,7 +7287,7 @@ class ConfirmStartView(View):
                                        f"**🎭 Tell (mod only):** {tell_desc}")
 
                     # Start proactive loop
-                    asyncio.create_task(_npc_proactive_loop(interaction.guild, interaction.guild_id))
+                    safe_task(_npc_proactive_loop(interaction.guild, interaction.guild_id), "npc_proactive")
                     safe_task(_npc_idle_check_loop(interaction.guild, interaction.guild_id), "npc_idle")
                     safe_task(_npc_vote_watch_loop(interaction.guild, interaction.guild_id), "npc_vote_watch")
 
@@ -7279,7 +7306,7 @@ class ConfirmStartView(View):
                             await w.send(random.choice(intros),
                                          username=f"{nm} •", avatar_url=av)
 
-                    asyncio.create_task(_npc_intro(npc_wh.id, npc_wh.token, avatar_url, npc_name))
+                    safe_task(_npc_intro(npc_wh.id, npc_wh.token, avatar_url, npc_name), "npc_intro")
 
                 except Exception as e:
                     print(f"NPC auto-create error: {e}")
@@ -7349,7 +7376,7 @@ class ConfirmStartView(View):
             + "\n".join(f"• <@{pid}>: **{role}**" for pid, role in assignments.items()))
 
         # ── Generate pre-game Blood Board for mod approval ────────────────
-        asyncio.create_task(_post_pregame_bloodboard(
+        safe_task(_post_pregame_bloodboard(
             interaction.guild, interaction.guild_id, players, assignments))
 
         # ── Prompt mod to start Night 1 ───────────────────────────────────
@@ -7540,7 +7567,7 @@ async def end_game(interaction: discord.Interaction):
         except Exception:
             pass  # Followup token may have expired — that's fine, game is ended
 
-    asyncio.create_task(_do_end())
+    safe_task(_do_end(), "do_end")
 
 
 # ====================== PLAYER MANAGEMENT ======================
@@ -9617,8 +9644,7 @@ async def _run_elimination(guild, interaction, player, role_name, public, assign
         if top_id != player.id:
             npcs_check = db_get_npcs(guild.id)
             if any(n["npc_id"] == top_id and n["is_alive"] for n in npcs_check):
-                asyncio.create_task(
-                    _npc_survival_reaction(guild, guild.id, top_id))
+                safe_task(_npc_survival_reaction(guild, guild.id, top_id), "npc_survival")
 
     try:
         await interaction.followup.send(
@@ -9843,8 +9869,7 @@ async def _eliminate_player(guild: discord.Guild, player_id: int, reason: str):
                 # Clear bond BEFORE eliminating partner to prevent recursion
                 db_clear_cupid_current(guild.id)
                 if partner_row[1] == "Shadow Wolf":
-                    asyncio.create_task(
-                        _generate_sw_kill_list(guild, guild.id, partner_id, player_id))
+                    safe_task(_generate_sw_kill_list(guild, guild.id, partner_id, player_id), "sw_kill_list")
                 await _eliminate_player(guild, partner_id, "died of heartbreak (Cupid bond)")
 
     # ── Auto-refresh any player's tracker that includes this dead player ──
@@ -9873,9 +9898,9 @@ async def _eliminate_player(guild: discord.Guild, player_id: int, reason: str):
 
     # ── Shadow Wolf kill list trigger ────────────────────────────────────
     if assignment[1] == "Shadow Wolf":
-        asyncio.create_task(_generate_sw_kill_list(guild, guild.id, player_id, player_id))
+        safe_task(_generate_sw_kill_list(guild, guild.id, player_id, player_id), "sw_kill_list")
     # If this player is on the SW kill list, mark them dead
-    asyncio.create_task(_sw_mark_dead(guild, guild.id, player_id, "other"))
+    safe_task(_sw_mark_dead(guild, guild.id, player_id, "other"), "sw_mark_dead")
 
     # ── Cupid bond — if Shadow Wolf died from bond, use partner's voters ──
     # (handled below in Cupid check — we pass voted_out_id = partner_id)
@@ -10028,7 +10053,7 @@ async def _eliminate_player(guild: discord.Guild, player_id: int, reason: str):
             except Exception:
                 pass
         # Other NPCs react to this death
-        asyncio.create_task(_npc_react_to_death(guild, guild.id, npc_row["name"]))
+        safe_task(_npc_react_to_death(guild, guild.id, npc_row["name"]), "npc_death_react")
         await log_event(guild, phase, f"💀 **{npc_row['name']}** (NPC) eliminated — {reason}")
         await post_mod_log(guild, f"💀 **{npc_row['name']}** (NPC) eliminated. Role: **{assignment[1]}**")
         await refresh_player_list(guild)
@@ -10065,7 +10090,7 @@ async def _eliminate_player(guild: discord.Guild, player_id: int, reason: str):
                                f"⚡ **Agitator frenzy** — {elim_count}/2 eliminations done for Day {night_now}. "
                                f"**One more elimination required.**")
     # NPCs react to this player's death and pin it to their memory
-    asyncio.create_task(_npc_react_to_death(guild, guild.id, player.display_name))
+    safe_task(_npc_react_to_death(guild, guild.id, player.display_name), "npc_death_react")
     night_num_pin = db_get_night_num(guild.id)
     phase_pin = state.get("phase", "day").capitalize()
     for npc_p in db_get_npcs(guild.id):
@@ -11956,7 +11981,7 @@ class ShadowWolfView(BaseNightView):
                            f"**{actor.display_name if actor else self.actor_id}** targeting **{tname}** (kill list)")
 
         # Mark as killed by Shadow Wolf on the list
-        asyncio.create_task(_sw_mark_dead(interaction.guild, interaction.guild_id, target_id, "sw"))
+        safe_task(_sw_mark_dead(interaction.guild, interaction.guild_id, target_id, "sw"), "sw_mark_dead")
 
         await interaction.response.edit_message(
             content=fmt(f"✅ Kill submitted on {tname} (post-death ability).\nYour kill list has been updated."),
