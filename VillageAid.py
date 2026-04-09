@@ -6679,6 +6679,10 @@ class ConfirmStartView(View):
         try:
             category = await interaction.guild.create_category(
                 ch_name("Village Game", font, "🎮 "))
+        except discord.errors.Forbidden:
+            return await interaction.followup.send(
+                "❌ Missing permissions to create channels. Make sure the bot has **Administrator** "
+                "or **Manage Channels** + **Manage Roles** permissions on this server.", ephemeral=True)
         except Exception as e:
             return await interaction.followup.send(f"❌ Failed to create category: {e}", ephemeral=True)
 
@@ -6695,11 +6699,20 @@ class ConfirmStartView(View):
         dead_role     = interaction.guild.get_role(dead_role_id) if dead_role_id else None
 
         # mod-log
-        mod_log_ow = {everyone: discord.PermissionOverwrite(view_channel=False), bot_me: bot_ow}
-        if mod_role:
-            mod_log_ow[mod_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
-        if spec_role: mod_log_ow[spec_role] = read_ow
-        mod_log_ch = await category.create_text_channel(ch_name("mod-log",     font, "📋"), overwrites=mod_log_ow)
+        try:
+            mod_log_ow = {everyone: discord.PermissionOverwrite(view_channel=False), bot_me: bot_ow}
+            if mod_role:
+                mod_log_ow[mod_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
+            if spec_role: mod_log_ow[spec_role] = read_ow
+            mod_log_ch = await category.create_text_channel(ch_name("mod-log",     font, "📋"), overwrites=mod_log_ow)
+        except discord.errors.Forbidden:
+            await category.delete()
+            return await interaction.followup.send(
+                "❌ Bot lacks permission to create channels in this server.\n"
+                "Please give the bot **Administrator** permission and try again.", ephemeral=True)
+        except Exception as e:
+            await category.delete()
+            return await interaction.followup.send(f"❌ Channel creation failed: {e}", ephemeral=True)
 
         # player-list
         player_list_ow = {everyone: read_ow, bot_me: bot_ow}
