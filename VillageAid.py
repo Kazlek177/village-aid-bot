@@ -2248,6 +2248,7 @@ async def refresh_hall_of_fame(guild):
 
 def build_hall_of_fame_embed(guild, rows):
     """Pinned embed showing the top 3 players of all time with extended stats."""
+    guild_id = guild.id
     embed = discord.Embed(
         title="🏛️ Hall of Fame",
         description="The greatest players in Village Aid history.",
@@ -2259,7 +2260,7 @@ def build_hall_of_fame_embed(guild, rows):
     if not top3:
         embed.add_field(name="No entries yet", value="Play some games to appear here!", inline=False)
 
-    # Extended stats from DB
+    # Extended stats from DB — scoped to this guild
     conn = sqlite3.connect(DB_FILE)
     c    = conn.cursor()
 
@@ -2272,8 +2273,11 @@ def build_hall_of_fame_embed(guild, rows):
         name     = m.display_name if m else f"<@{pid}>"
         win_rate = f"{(wins/games*100):.0f}%" if games > 0 else "0%"
 
-        # Fetch extended stats
-        c.execute("SELECT wolf_votes_correct, times_accused, seer_correct FROM player_stats WHERE player_id=?", (pid,))
+        # Fetch extended stats — scoped to this guild
+        c.execute(
+            "SELECT wolf_votes_correct, times_accused, seer_correct FROM player_stats "
+            "WHERE guild_id=? AND player_id=?",
+            (guild_id, pid))
         ext = c.fetchone()
         wolf_correct = ext[0] if ext and ext[0] else 0
         accused      = ext[1] if ext and ext[1] else 0
@@ -2293,15 +2297,27 @@ def build_hall_of_fame_embed(guild, rows):
             inline=False
         )
 
+    conn.close()
 
-    # Special records section
-    c2 = sqlite3.connect(DB_FILE).cursor()
-    c2.execute("SELECT player_id, wolf_votes_correct FROM player_stats ORDER BY wolf_votes_correct DESC LIMIT 1")
+    # Special records — scoped to this guild
+    conn2 = sqlite3.connect(DB_FILE)
+    c2    = conn2.cursor()
+    c2.execute(
+        "SELECT player_id, wolf_votes_correct FROM player_stats "
+        "WHERE guild_id=? ORDER BY wolf_votes_correct DESC LIMIT 1",
+        (guild_id,))
     top_voter = c2.fetchone()
-    c2.execute("SELECT player_id, times_accused FROM player_stats ORDER BY times_accused DESC LIMIT 1")
+    c2.execute(
+        "SELECT player_id, times_accused FROM player_stats "
+        "WHERE guild_id=? ORDER BY times_accused DESC LIMIT 1",
+        (guild_id,))
     top_accused = c2.fetchone()
-    c2.execute("SELECT player_id, seer_correct FROM player_stats ORDER BY seer_correct DESC LIMIT 1")
+    c2.execute(
+        "SELECT player_id, seer_correct FROM player_stats "
+        "WHERE guild_id=? ORDER BY seer_correct DESC LIMIT 1",
+        (guild_id,))
     top_seer = c2.fetchone()
+    conn2.close()
 
     records = []
     if top_voter and top_voter[1]:
@@ -6167,6 +6183,18 @@ async def _run_start_night(guild, guild_id, night_num, duration, state):
                 await ch.send(fmt(
                     f"🌙 Night {night_num} has begun.\n"
                     f"🦴 Your tracking ability activates from Night 2 onwards. Sleep tight."))
+            elif role_name == "Governor":
+                await ch.send(fmt(
+                    f"🌙 Night {night_num} has begun.\n"
+                    f"🎖️ You have no night ability — rest until morning.\n"
+                    f"When the day vote opens tomorrow, you will receive a pardon button in this channel.\n"
+                    f"You must submit it at least 15 minutes before the vote closes."))
+            elif role_name == "Hermit":
+                await ch.send(fmt(
+                    f"🌙 Night {night_num} has begun.\n"
+                    f"🏚️ You have no night ability — rest until morning.\n"
+                    f"When the day vote opens tomorrow, you will receive an ability button in this channel.\n"
+                    f"You must submit it at least 20 minutes before the vote closes."))
             else:
                 await ch.send(fmt(f"🌙 Night {night_num} has begun. Sleep tight — await the morning."))
         else:
@@ -6330,6 +6358,13 @@ async def on_ready():
             if phase == "night" and state.get("wolf_vote_msg_id"):
                 await refresh_wolf_vote(guild, night_num)
             print(f"Restored active game for guild {guild.id} (phase={phase}, night={night_num})")
+            if phase == "night":
+                await post_mod_log(guild,
+                    f"🔄 **Bot restarted during Night {night_num}.**\n"
+                    f"Day vote buttons and the mod dashboard have been restored.\n"
+                    f"Night action buttons in player channels are still active if players haven't pressed them.\n"
+                    f"If a player's ability button is unresponsive, use `/submit_action` to submit on their behalf, "
+                    f"or `/remind_night` to re-send their action prompt.")
 
             # Re-schedule night auto-resolve if night is active
             if phase == "night":
@@ -6372,7 +6407,71 @@ async def on_ready():
     else:
         print(f"Restored {active_games} active game(s)")
 
+    # ── Register persistent views so buttons survive bot restarts ─────────
+    # Discord requires persistent views (timeout=None) to be re-registered
+    # on every startup so the bot can handle interactions on old messages.
+    # We register one instance per active guild for views that hold guild_id.
+    registered = 0
+    for guild in client.guilds:
+        state = db_get_state(guild.id)
+        if not state or not state.get("category_id"):
+            continue  # No active game in this guild
+        gid       = guild.id
+        night_num = db_get_night_num(gid)
+        phase     = state.get("phase", "day")
+
+        # Day vote — pinned in village-chat
+        client.add_view(DayVoteView(gid), message_id=state.get("day_vote_msg_id"))
+
+        # Wolf vote — pinned in wolf-den
+        if phase == "night":
+            wv_mid = state.get("wolf_vote_msg_id")
+            if wv_mid:
+                client.add_view(WolfVoteView(gid, night_num), message_id=wv_mid)
+
+        # Mod dashboard — pinned in mod-log
+        db_mid = state.get("mod_dashboard_msg_id")
+        if db_mid:
+            client.add_view(ModDashboardView(gid), message_id=db_mid)
+
+        registered += 1
+
+        # Register stateless persistent views — use interaction.guild_id when triggered
+        client.add_view(DeliverResultsView())  # bare registration, guild_id resolved at interaction time
+        client.add_view(NightStatusView())     # bare registration, actor resolved at interaction time
+
+        print(f"Persistent views registered for {registered} active guild(s)")
+
 # ====================== ERROR HANDLER ======================
+
+@client.event
+async def on_guild_join(guild: discord.Guild):
+    """When the bot joins a new server — load default roles and sync commands."""
+    print(f"Joined new guild: {guild.name} ({guild.id})")
+    load_default_roles(guild.id)
+    # Instantly sync slash commands to this guild
+    try:
+        tree.copy_global_to(guild=guild)
+        await tree.sync(guild=guild)
+        print(f"Commands synced to new guild {guild.id}")
+    except Exception as e:
+        print(f"[on_guild_join] sync error for {guild.id}: {e}")
+
+
+@client.event
+async def on_guild_remove(guild: discord.Guild):
+    """When the bot is removed from a server — clean up in-memory state."""
+    _state_cache.pop(guild.id, None)
+    _roles_cache.pop(guild.id, None)
+    _mod_role_cache.pop(guild.id, None)
+    night_timers.pop(guild.id, None)
+    day_vote_timers.pop(guild.id, None)
+    # Remove any cached NPC webhooks for this guild
+    keys_to_remove = [k for k in _npc_webhooks if k[0] == guild.id]
+    for k in keys_to_remove:
+        _npc_webhooks.pop(k, None)
+    print(f"Left guild {guild.id} — in-memory state cleared")
+
 
 @tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -7241,7 +7340,7 @@ class RoleBuilderView(View):
         # Replay protection
         last = db_get_last_roles(interaction.guild_id)
         if last and last == final_counts:
-            view = ReplayWarningView(interaction.guild_id, final_counts, self.all_roles)
+            view = ReplayWarningView(interaction.guild_id, final_counts, self.all_roles, self.npc_count)
             await interaction.followup.send(
                 "⚠️ **Replay Warning** — same role combination as last game!\n"
                 "Consider mixing it up. Continue anyway?",
@@ -7694,6 +7793,8 @@ class ConfirmStartView(View):
                 "Alpha": "Phase 6 — Wolf Action", "Elite Alpha": "Phase 6 — Wolf Action",
                 "Witch": "Phase 5 & 7", "Bloodhound": "Phase 9 — Investigations",
                 "Wolf Pup": "Phase 2 — Blocks", "Agitator": "Phase 4 — Declarations",
+                "Governor": "Day ability — you will receive a button in this channel when the vote opens",
+                "Hermit":   "Day ability — you will receive a button in this channel when the vote opens",
             }.get(role_name, "See /roleinfo for night order")
 
             orient_embed = discord.Embed(
@@ -7927,10 +8028,10 @@ class ConfirmStartView(View):
                     conn_npc.commit()
                     conn_npc.close()
 
-                    # If wolf, give den access
+                    # If wolf, note den access in mod-log (NPCs use webhooks, not Discord perms)
                     if get_team(interaction.guild_id, chosen_role) == "wolf":
-                        await wolf_ch.set_permissions(bot_me,
-                            view_channel=True, send_messages=True, read_messages=True)
+                        await post_mod_log(interaction.guild,
+                            f"🤖 NPC wolf **{npc_name}** ({chosen_role}) added — has den awareness via NPC system.")
 
                     # Send role card to private channel — sent by bot so it renders as a proper embed
                     role_info_npc = get_role_info(interaction.guild_id, chosen_role)
@@ -7997,7 +8098,6 @@ class ConfirmStartView(View):
             wolf_vote_channel_id=None,
             ghost_channel_id=ghost_ch.id,
             mod_log_channel_id=mod_log_ch.id,
-            wheel_channel_id=bb_game_ch.id,  # Reusing wheel_channel_id slot for blood-board
             bb_channel_id=bb_game_ch.id,
             player_list_ch_id=player_list_ch.id,
             role_list_ch_id=role_list_ch.id,
@@ -8010,7 +8110,11 @@ class ConfirmStartView(View):
             wolf_vote_msg_id=None,
             day_vote_end_time=None,
             village_chat_ch_id=village_chat_ch.id,
-            win_tracker_ch_id=win_tracker_ch.id
+            win_tracker_ch_id=win_tracker_ch.id,
+            mod_dashboard_msg_id=None,
+            night_bb_done=0,
+            day_bb_done=0,
+            investigations_done=0
         )
 
         # Timeline embed
@@ -8071,10 +8175,6 @@ class ConfirmStartView(View):
         )
 
         # ── Post and pin the mod dashboard ───────────────────────────────
-        # Reset dashboard flags for new game
-        db_set_state(interaction.guild_id,
-                     night_bb_done=0, day_bb_done=0, investigations_done=0,
-                     mod_dashboard_msg_id=None)
         invalidate_cache(interaction.guild_id)
         safe_task(update_mod_dashboard(interaction.guild), "dashboard_init")
 
@@ -9821,11 +9921,11 @@ class DayVoteView(View):
                 description = "🤖 NPC" if pid in npc_map else None
             ))
         # Check how many votes this player is allowed
-        state_vote   = db_get_state(self.guild_id) or {}
+        state_vote   = db_get_state(interaction.guild_id) or {}
         max_votes    = int(state_vote.get("votes_per_player") or 1)
-        night_now    = db_get_night_num(self.guild_id)
-        votes_1      = db_get_day_votes(self.guild_id)
-        votes_2      = db_get_day_votes_2(self.guild_id)
+        night_now    = db_get_night_num(interaction.guild_id)
+        votes_1      = db_get_day_votes(interaction.guild_id)
+        votes_2      = db_get_day_votes_2(interaction.guild_id)
         has_voted_1  = any(v[0] == interaction.user.id for v in votes_1)
         has_voted_2  = any(v[0] == interaction.user.id for v in votes_2)
 
@@ -9833,7 +9933,7 @@ class DayVoteView(View):
             # Both frenzy votes cast — ask which to change
             v1_target = next((v[1] for v in votes_1 if v[0] == interaction.user.id), None)
             v2_target = next((v[1] for v in votes_2 if v[0] == interaction.user.id), None)
-            npc_map_fv = {n["npc_id"]: n["name"] for n in db_get_npcs(self.guild_id)}
+            npc_map_fv = {n["npc_id"]: n["name"] for n in db_get_npcs(interaction.guild_id)}
             def _fname(pid):
                 if pid is None: return "Abstain"
                 npc = npc_map_fv.get(pid)
@@ -9842,17 +9942,17 @@ class DayVoteView(View):
                 return m.display_name if m else str(pid)
             v1_name = _fname(v1_target)
             v2_name = _fname(v2_target)
-            view = FrenzyVotePickView(self.guild_id, options, rows, v1_name, v2_name)
+            view = FrenzyVotePickView(interaction.guild_id, options, rows, v1_name, v2_name)
             await interaction.response.send_message(
                 fmt(f"⚡ **Frenzy — both votes cast.**\nVote 1: **{v1_name}** | Vote 2: **{v2_name}**\nWhich would you like to change?"),
                 view=view, ephemeral=True)
         elif max_votes >= 2 and has_voted_1 and not has_voted_2:
             label = "⚡ **Frenzy active — cast your SECOND vote:**"
-            view  = VoteTargetView(self.guild_id, options, rows, is_second_vote=True)
+            view  = VoteTargetView(interaction.guild_id, options, rows, is_second_vote=True)
             await interaction.response.send_message(fmt(label), view=view, ephemeral=True)
         else:
             prompt = "Choose who to vote for:" if max_votes == 1 else f"Cast your vote (1 of {max_votes}):"
-            view   = VoteTargetView(self.guild_id, options, rows)
+            view   = VoteTargetView(interaction.guild_id, options, rows)
             await interaction.response.send_message(prompt, view=view, ephemeral=True)
 
     async def abstain(self, interaction: discord.Interaction):
@@ -14762,7 +14862,7 @@ class NightStatusView(View):
       ✅  Using my ability tonight  — posts to mod-log, disables view
       💤  Pass / no action tonight  — saves _pass action to DB, posts to mod-log, disables view
     """
-    def __init__(self, guild_id, actor_id, role_name, night_num):
+    def __init__(self, guild_id=None, actor_id=None, role_name=None, night_num=None):
         super().__init__(timeout=None)
         self.guild_id  = guild_id
         self.actor_id  = actor_id
@@ -14777,24 +14877,30 @@ class NightStatusView(View):
         self.add_item(pass_btn)
 
     async def on_use(self, interaction: discord.Interaction):
-        if interaction.user.id != self.actor_id:
+        if self.actor_id and interaction.user.id != self.actor_id:
             return await interaction.response.send_message("❌ This isn't your status button.", ephemeral=True)
-        actor = interaction.guild.get_member(self.actor_id)
+        actor = interaction.guild.get_member(self.actor_id or interaction.user.id)
+        role  = self.role_name or "Unknown"
+        night = self.night_num or db_get_night_num(interaction.guild_id)
         await post_mod_log(interaction.guild,
-            f"✅ **{self.role_name}** — Night {self.night_num}\n"
-            f"**{actor.display_name if actor else self.actor_id}** confirmed: using their ability tonight.")
+            f"✅ **{role}** — Night {night}\n"
+            f"**{actor.display_name if actor else interaction.user.display_name}** confirmed: using their ability tonight.")
         await interaction.response.edit_message(
             content=fmt("✅ Got it — the mod knows you are using your ability tonight.\nSubmit it using the action above."),
             view=None)
 
     async def on_pass(self, interaction: discord.Interaction):
-        if interaction.user.id != self.actor_id:
+        if self.actor_id and interaction.user.id != self.actor_id:
             return await interaction.response.send_message("❌ This isn't your status button.", ephemeral=True)
-        db_save_night_action(self.guild_id, self.night_num, self.actor_id, "_pass", None)
-        actor = interaction.guild.get_member(self.actor_id)
+        guild_id  = interaction.guild_id
+        actor_id  = self.actor_id or interaction.user.id
+        night_num = self.night_num or db_get_night_num(guild_id)
+        role      = self.role_name or "Unknown"
+        db_save_night_action(guild_id, night_num, actor_id, "_pass", None)
+        actor = interaction.guild.get_member(actor_id)
         await post_mod_log(interaction.guild,
-            f"💤 **{self.role_name}** — Night {self.night_num}\n"
-            f"**{actor.display_name if actor else self.actor_id}** is passing — no action tonight.")
+            f"💤 **{role}** — Night {night_num}\n"
+            f"**{actor.display_name if actor else interaction.user.display_name}** is passing — no action tonight.")
         await interaction.response.edit_message(
             content=fmt("💤 Passed. The mod has been notified. Sleep tight!"),
             view=None)
@@ -15439,10 +15545,17 @@ async def _deliver_night_results(guild, guild_id: int, night_num: int):
 
 class DeliverResultsView(View):
     """Posted to mod-log after resolve_night — mod clicks to deliver investigative results."""
-    def __init__(self, guild_id, night_num):
+    def __init__(self, guild_id=None, night_num=None):
         super().__init__(timeout=None)
         self.guild_id  = guild_id
         self.night_num = night_num
+
+        if guild_id is None:
+            # Bare registration for restart recovery — buttons added minimally
+            btn = Button(label="✅ Deliver Night Results", style=discord.ButtonStyle.green)
+            btn.callback = self.on_deliver
+            self.add_item(btn)
+            return
 
         # Check for pending turns — warn mod if turn hasn't been confirmed yet
         conn_dv = sqlite3.connect(DB_FILE)
@@ -15467,11 +15580,17 @@ class DeliverResultsView(View):
         self.add_item(btn)
 
     async def on_deliver(self, interaction: discord.Interaction):
+        # Use stored guild_id/night_num, or fall back to live state after restart
+        guild_id  = self.guild_id  or interaction.guild_id
+        night_num = self.night_num or db_get_night_num(guild_id)
         await interaction.response.edit_message(
-            content=f"⏳ Delivering Night {self.night_num} results...", view=None)
-        await _deliver_night_results(interaction.guild, self.guild_id, self.night_num)
+            content=f"⏳ Delivering Night {night_num} results...", view=None)
+        await _deliver_night_results(interaction.guild, guild_id, night_num)
+        db_set_state(guild_id, investigations_done=1)
+        invalidate_cache(guild_id)
+        safe_task(update_mod_dashboard(interaction.guild), "dashboard_deliver")
         await interaction.edit_original_response(
-            content=f"✅ Night {self.night_num} results delivered to all players.")
+            content=f"✅ Night {night_num} results delivered to all players.")
 
 SEER_WOLF_LINES = [
     "The veil parts for a moment. The truth is unmistakable.",
@@ -16727,6 +16846,9 @@ async def night_status(interaction: discord.Interaction):
 
     for pid, role, is_alive, _ in rows:
         if not is_alive:
+            continue
+        # Skip roles that have no night action (day-ability roles and true passives)
+        if role in NIGHT_NO_BUTTON_ROLES and role not in ROLE_VIEW_MAP:
             continue
         name = npc_map.get(pid)
         if not name:
@@ -18150,13 +18272,14 @@ async def roleinfo(interaction: discord.Interaction, role: str):
         "Dire Wolf":    "Phase 3 — Bonds",
         "Agitator":     "Phase 4 — Declarations",
         "Clone":        "Phase 4 — Declarations",
-                "Doctor":       "Phase 5 — Protection",
+        "Doctor":       "Phase 5 — Protection",
         "Surgeon":      "Phase 5 — Protection",
         "Huntsman":     "Phase 5 — Protection",
         "Witch":        "Phase 5 — Protection (save) / Phase 7 — Independent Kills (poison)",
         "Alpha":        "Phase 6 — Wolf Action (turn)",
         "Elite Alpha":  "Phase 6 — Wolf Action (turn)",
         "Wolf":         "Phase 6 — Den Kill",
+        "Werekitten":   "Phase 6 — Den Kill (replaces den kill, max 2 uses)",
         "Crazed Wolf":  "Phase 6 — Den Kill",
         "Echo-Stalker": "Phase 6 — Den Kill",
         "White Wolf":   "Phase 7 — Independent Kills",
@@ -18167,17 +18290,25 @@ async def roleinfo(interaction: discord.Interaction, role: str):
         "Insomniac":    "Phase 10 — Information",
         "Gravedigger":  "Phase 10 — Information",
         "Oracle":       "Phase 10 — Information",
+        "Governor":     "Day ability — button sent to private channel when vote opens (15 min before close)",
+        "Hermit":       "Day ability — button sent to private channel when vote opens (20 min before close)",
     }
     night_pos = NIGHT_ORDER.get(matched["name"], "Passive — no night action")
 
-    # Check if role has a button or is passive
-    from_no_btn = matched["name"] in {
+    # Determine ability type
+    day_ability_roles = {"Governor", "Hermit"}
+    passive_roles = {
         "Villager", "Diseased", "Drunk", "Lycan", "Mayor", "Pothead",
         "Prostitute", "Time Lord", "Traitor", "Village Idiot", "Village Jokester",
-        "Virgin", "Blessed Wolf", "Werekitten", "Fairy Elf", "Warlock",
-        "Sheriff", "Wolf", "Insomniac"
+        "Virgin", "Blessed Wolf", "Fairy Elf", "Warlock",
+        "Sheriff", "Wolf", "Insomniac", "Elder", "Gravedigger"
     }
-    ability_type = "Passive" if from_no_btn else "Active (night button)"
+    if matched["name"] in day_ability_roles:
+        ability_type = "Day ability (button in private channel)"
+    elif matched["name"] in passive_roles:
+        ability_type = "Passive — no action button"
+    else:
+        ability_type = "Active (night button in private channel)"
 
     embed = discord.Embed(
         title       = f"{team_emoji} {matched['name']}",
