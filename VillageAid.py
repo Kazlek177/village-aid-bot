@@ -47,6 +47,7 @@ def db_conn():
     try:
         yield conn
         conn.commit()
+        conn.close()
     except Exception:
         conn.rollback()
         raise
@@ -622,6 +623,7 @@ def init_db():
         pass
 
     conn.commit()
+    conn.close()
 
 init_db()
 
@@ -800,6 +802,7 @@ def load_default_roles(guild_id):
             c.execute("INSERT OR IGNORE INTO game_roles VALUES (?,?,?,?,?)",
                       (guild_id, name, desc, cnt, team))
         conn.commit()
+        conn.close()
     invalidate_cache(guild_id)
 
 # ====================== UNICODE FONT SYSTEM ======================
@@ -927,6 +930,7 @@ def db_save_role(guild_id, name, description, count, team):
     c.execute("INSERT OR REPLACE INTO game_roles VALUES (?,?,?,?,?)",
               (guild_id, name, description, count, team.lower()))
     conn.commit()
+    conn.close()
     invalidate_cache(guild_id)
 
 def db_load_roles(guild_id):
@@ -934,6 +938,8 @@ def db_load_roles(guild_id):
     c    = conn.cursor()
     c.execute("SELECT role_name, description, count, team FROM game_roles WHERE guild_id=?", (guild_id,))
     rows = c.fetchall()
+    conn.close()
+
     return [{"name": r[0], "description": r[1], "count": r[2], "team": r[3]} for r in rows]
 
 def db_delete_role(guild_id, name):
@@ -941,6 +947,7 @@ def db_delete_role(guild_id, name):
     c    = conn.cursor()
     c.execute("DELETE FROM game_roles WHERE guild_id=? AND role_name=?", (guild_id, name))
     conn.commit()
+    conn.close()
     invalidate_cache(guild_id)
 
 def db_get_state(guild_id):
@@ -964,6 +971,7 @@ def db_set_state(guild_id, **kwargs):
     for key, val in kwargs.items():
         c.execute(f"UPDATE game_state SET {key}=? WHERE guild_id=?", (val, guild_id))
     conn.commit()
+    conn.close()
     invalidate_cache(guild_id)
 
 def db_clear_state(guild_id):
@@ -977,9 +985,10 @@ def db_clear_state(guild_id):
                 "player_tracker","player_tracker_msg","claim_channels",
                 "npcs","role_history","night_order","vote_history",
                 "wraith_marks","wraith_state","role_reservations","ability_uses",
-                "white_wolf_strikes"]:
+                "white_wolf_strikes","message_counts"]:
         c.execute(f"DELETE FROM {tbl} WHERE guild_id=?", (guild_id,))
     conn.commit()
+    conn.close()
     invalidate_cache(guild_id)
 
 # ── Ability Uses Tracking ─────────────────────────────────────────────────
@@ -997,6 +1006,7 @@ def db_get_ability_uses(guild_id, player_id):
     c.execute("SELECT uses_left FROM ability_uses WHERE guild_id=? AND player_id=?",
               (guild_id, player_id))
     row = c.fetchone()
+    conn.close()
     return row[0] if row else None
 
 def db_deduct_ability_uses(guild_id, player_id, amount=1):
@@ -1005,6 +1015,7 @@ def db_deduct_ability_uses(guild_id, player_id, amount=1):
     c.execute("""UPDATE ability_uses SET uses_left = MAX(0, uses_left - ?)
                  WHERE guild_id=? AND player_id=?""", (amount, guild_id, player_id))
     conn.commit()
+    conn.close()
 
 # ── Role Reservations ─────────────────────────────────────────────────────
 def db_set_reservation(guild_id, player_id, player_name, role_name):
@@ -1020,6 +1031,7 @@ def db_get_reservations(guild_id):
     c    = conn.cursor()
     c.execute("SELECT player_id, player_name, role_name FROM role_reservations WHERE guild_id=?", (guild_id,))
     rows = c.fetchall()
+    conn.close()
     return rows  # [(player_id, player_name, role_name), ...]
 
 def db_clear_reservation(guild_id, player_id):
@@ -1051,6 +1063,7 @@ def db_get_assignments(guild_id):
     c    = conn.cursor()
     c.execute("SELECT player_id, role_name, is_alive, channel_id FROM player_assignments WHERE guild_id=?", (guild_id,))
     rows = c.fetchall()
+    conn.close()
     return rows
 
 def db_set_player_alive(guild_id, player_id, alive: bool):
@@ -1059,6 +1072,7 @@ def db_set_player_alive(guild_id, player_id, alive: bool):
     c.execute("UPDATE player_assignments SET is_alive=? WHERE guild_id=? AND player_id=?",
               (1 if alive else 0, guild_id, player_id))
     conn.commit()
+    conn.close()
     invalidate_cache(guild_id)
 
 def db_get_night_num(guild_id):
@@ -1066,6 +1080,7 @@ def db_get_night_num(guild_id):
     c    = conn.cursor()
     c.execute("SELECT night_num FROM game_counters WHERE guild_id=?", (guild_id,))
     row = c.fetchone()
+    conn.close()
     return row[0] if row else 0
 
 def db_increment_night(guild_id):
@@ -1087,6 +1102,7 @@ def db_save_night_action(guild_id, night_num, actor_id, action_type, target_id):
     c.execute("INSERT OR REPLACE INTO night_actions VALUES (?,?,?,?,?,0)",
               (guild_id, night_num, actor_id, action_type, target_id))
     conn.commit()
+    conn.close()
     invalidate_cache(guild_id)
     return is_update  # True if this was an update to an existing action
 
@@ -1096,6 +1112,7 @@ def db_get_night_actions(guild_id, night_num):
     c.execute("SELECT actor_id, action_type, target_id FROM night_actions WHERE guild_id=? AND night_num=?",
               (guild_id, night_num))
     rows = c.fetchall()
+    conn.close()
     return rows
 
 def db_get_witch_uses(guild_id, player_id):
@@ -1103,6 +1120,7 @@ def db_get_witch_uses(guild_id, player_id):
     c    = conn.cursor()
     c.execute("SELECT used_save, used_kill FROM witch_uses WHERE guild_id=? AND player_id=?", (guild_id, player_id))
     row = c.fetchone()
+    conn.close()
     return (row[0], row[1]) if row else (0, 0)
 
 def db_set_witch_use(guild_id, player_id, save=None, kill=None):
@@ -1123,9 +1141,9 @@ def db_set_day_vote(guild_id, voter_id, target_id, day_num=None):
     c    = conn.cursor()
     c.execute("INSERT OR REPLACE INTO day_votes VALUES (?,?,?,?)", (guild_id, voter_id, target_id, ts))
     conn.commit()
-    # Record in persistent vote history
-    if day_num is not None:
-        db_record_vote_history(guild_id, day_num, voter_id, target_id, "vote")
+    conn.close()
+    # NOTE: vote_history is recorded by the caller with the correct action type
+    # (vote vs change vs abstain) — not auto-recorded here to avoid duplicate entries
 
 
 def db_increment_message_count(guild_id, player_id, day_num):
@@ -1146,6 +1164,7 @@ def db_get_message_counts(guild_id):
                  FROM message_counts WHERE guild_id=?
                  GROUP BY player_id ORDER BY total DESC""", (guild_id,))
     rows = c.fetchall()
+    conn.close()
     return rows  # (player_id, total, breakdown)
 
 def db_set_day_vote_2(guild_id, voter_id, target_id):
@@ -1160,6 +1179,7 @@ def db_get_day_votes_2(guild_id):
     c    = conn.cursor()
     c.execute("SELECT voter_id, target_id FROM day_votes_2 WHERE guild_id=?", (guild_id,))
     rows = c.fetchall()
+    conn.close()
     return rows
 
 def db_remove_day_vote_2(guild_id, voter_id):
@@ -1181,6 +1201,7 @@ def db_get_day_votes(guild_id):
     c    = conn.cursor()
     c.execute("SELECT voter_id, target_id, voted_at FROM day_votes WHERE guild_id=? ORDER BY voted_at ASC", (guild_id,))
     rows = c.fetchall()
+    conn.close()
     return rows  # (voter_id, target_id, voted_at)
 
 def db_clear_day_votes(guild_id):
@@ -1205,6 +1226,7 @@ def db_get_wolf_votes(guild_id, night_num):
     c.execute("SELECT voter_id, target_id FROM wolf_votes WHERE guild_id=? AND night_num=?",
               (guild_id, night_num))
     rows = c.fetchall()
+    conn.close()
     return rows
 
 # Game log
@@ -1224,6 +1246,7 @@ def db_get_log(guild_id):
     c    = conn.cursor()
     c.execute("SELECT timestamp, phase, event FROM game_log WHERE guild_id=? ORDER BY entry_id", (guild_id,))
     rows = c.fetchall()
+    conn.close()
     return rows
 
 # Vote history / Turn log / Block log helpers
@@ -1251,6 +1274,7 @@ def db_get_vote_history(guild_id):
         "SELECT day_num, voter_id, target_id, action, COALESCE(voted_at,0), COALESCE(vote_change_count,0) FROM vote_history WHERE guild_id=? ORDER BY entry_id",
         (guild_id,))
     rows = c.fetchall()
+    conn.close()
     return rows
 
 def db_record_turn(guild_id, night_num, actor_id, target_id, result):
@@ -1270,6 +1294,7 @@ def db_get_turn_log(guild_id):
         "SELECT night_num, actor_id, target_id, result FROM turn_log WHERE guild_id=? ORDER BY entry_id",
         (guild_id,))
     rows = c.fetchall()
+    conn.close()
     return rows
 
 def db_record_block(guild_id, night_num, blocker_id, target_id):
@@ -1289,6 +1314,7 @@ def db_get_block_log(guild_id):
         "SELECT night_num, blocker_id, target_id FROM block_log WHERE guild_id=? ORDER BY entry_id",
         (guild_id,))
     rows = c.fetchall()
+    conn.close()
     return rows
 
 
@@ -1300,6 +1326,7 @@ def db_get_elder_hits(guild_id):
     c    = conn.cursor()
     c.execute("SELECT hit_count FROM elder_hits WHERE guild_id=?", (guild_id,))
     row = c.fetchone()
+    conn.close()
     return row[0] if row else 0
 
 def db_increment_elder_hit(guild_id):
@@ -1315,6 +1342,7 @@ def db_clear_elder_hits(guild_id):
     c    = conn.cursor()
     c.execute("DELETE FROM elder_hits WHERE guild_id=?", (guild_id,))
     conn.commit()
+    conn.close()
 
 # Lobby helpers
 def db_get_lobby(guild_id):
@@ -1323,6 +1351,7 @@ def db_get_lobby(guild_id):
     c    = conn.cursor()
     c.execute("SELECT player_ids, message_id, channel_id, is_open FROM lobby WHERE guild_id=?", (guild_id,))
     row = c.fetchone()
+    conn.close()
     if not row:
         return None
     return {
@@ -1346,6 +1375,7 @@ def db_clear_lobby(guild_id):
     c    = conn.cursor()
     c.execute("DELETE FROM lobby WHERE guild_id=?", (guild_id,))
     conn.commit()
+    conn.close()
 
 # Shadow Wolf kill list helpers
 def db_set_shadow_wolf_list(guild_id, targets: list, message_id=None, channel_id=None):
@@ -1363,6 +1393,7 @@ def db_get_shadow_wolf_list(guild_id):
     c    = conn.cursor()
     c.execute("SELECT targets, message_id, channel_id FROM shadow_wolf_list WHERE guild_id=?", (guild_id,))
     row = c.fetchone()
+    conn.close()
     if not row:
         return None
     return {
@@ -1376,6 +1407,7 @@ def db_clear_shadow_wolf_list(guild_id):
     c    = conn.cursor()
     c.execute("DELETE FROM shadow_wolf_list WHERE guild_id=?", (guild_id,))
     conn.commit()
+    conn.close()
 
 # Cupid bond helpers
 def db_set_cupid_bond(guild_id, player1_id, player2_id):
@@ -1391,6 +1423,7 @@ def db_get_cupid_bond(guild_id):
     c    = conn.cursor()
     c.execute("SELECT player1_id, player2_id FROM cupid_bonds WHERE guild_id=?", (guild_id,))
     row = c.fetchone()
+    conn.close()
     return row  # (p1, p2) or None
 
 def db_clear_cupid_bond(guild_id):
@@ -1398,6 +1431,7 @@ def db_clear_cupid_bond(guild_id):
     c    = conn.cursor()
     c.execute("DELETE FROM cupid_bonds WHERE guild_id=?", (guild_id,))
     conn.commit()
+    conn.close()
 
 # Stats
 def db_update_stats(guild_id, player_ids, winner_ids, eliminated_ids):
@@ -1418,6 +1452,7 @@ def db_get_stats(guild_id):
     c    = conn.cursor()
     c.execute("SELECT player_id, games, wins, eliminations FROM player_stats WHERE guild_id=? ORDER BY wins DESC", (guild_id,))
     rows = c.fetchall()
+    conn.close()
     return rows
 
 # Replay protection
@@ -1435,6 +1470,8 @@ def db_get_last_roles(guild_id):
     c    = conn.cursor()
     c.execute("SELECT role_json FROM last_role_set WHERE guild_id=?", (guild_id,))
     row = c.fetchone()
+    conn.close()
+
     return json.loads(row[0]) if row and row[0] else {}
 
 
@@ -1479,6 +1516,7 @@ def db_get_npcs(guild_id):
         d["memory_summary"]= d["memory_summary"] or ""
         d["pinned_events"] = json.loads(d["pinned_events"] or "[]")
         result.append(d)
+    conn.close()
     return result
 
 
@@ -1533,6 +1571,7 @@ def db_update_npc_relationship(guild_id, npc_id, name: str, rel_type: str):
         c.execute(f"UPDATE npcs SET {col}=? WHERE guild_id=? AND npc_id=?",
                   (_jr.dumps(current), guild_id, npc_id))
         conn.commit()
+        conn.close()
     conn.close()
 
 def db_update_npc_suspicions(guild_id, npc_id, suspicions: list):
@@ -1568,6 +1607,7 @@ def db_delete_npcs(guild_id):
     c    = conn.cursor()
     c.execute("DELETE FROM npcs WHERE guild_id=?", (guild_id,))
     conn.commit()
+    conn.close()
 
 
 
@@ -1586,6 +1626,7 @@ def db_get_cupid_current(guild_id):
     c    = conn.cursor()
     c.execute("SELECT player1_id, player2_id FROM cupid_bond_current WHERE guild_id=?", (guild_id,))
     row = c.fetchone()
+    conn.close()
     return row  # (p1, p2) or None
 
 def db_clear_cupid_current(guild_id):
@@ -1593,6 +1634,7 @@ def db_clear_cupid_current(guild_id):
     c    = conn.cursor()
     c.execute("DELETE FROM cupid_bond_current WHERE guild_id=?", (guild_id,))
     conn.commit()
+    conn.close()
 
 # Speech violation helpers
 def db_get_violations(guild_id, player_id):
@@ -1601,6 +1643,7 @@ def db_get_violations(guild_id, player_id):
     c.execute("SELECT count FROM speech_violations WHERE guild_id=? AND player_id=?",
               (guild_id, player_id))
     row = c.fetchone()
+    conn.close()
     return row[0] if row else 0
 
 def db_increment_violation(guild_id, player_id):
@@ -1610,6 +1653,7 @@ def db_increment_violation(guild_id, player_id):
     c.execute("UPDATE speech_violations SET count=count+1 WHERE guild_id=? AND player_id=?",
               (guild_id, player_id))
     conn.commit()
+    conn.close()
     conn2 = sqlite3.connect(DB_FILE)
     c2    = conn2.cursor()
     c2.execute("SELECT count FROM speech_violations WHERE guild_id=? AND player_id=?",
@@ -1640,6 +1684,7 @@ def db_get_role_history(guild_id, player_id):
               "WHERE guild_id=? AND player_id=? ORDER BY game_num DESC",
               (guild_id, player_id))
     rows = c.fetchall()
+    conn.close()
     return rows  # [(role_name, team, game_num, outcome), ...]
 
 # Witch night helpers
@@ -1661,6 +1706,7 @@ def db_witch_already_acted(guild_id, night_num):
     c    = conn.cursor()
     c.execute("SELECT 1 FROM witch_nights WHERE guild_id=? AND night_num=?", (guild_id, night_num))
     row = c.fetchone()
+    conn.close()
     return row is not None
 
 # Blessed Wolf check helpers
@@ -1670,6 +1716,7 @@ def db_get_check_count(guild_id, target_id):
     c.execute("SELECT check_count FROM blessed_wolf_checks WHERE guild_id=? AND target_id=?",
               (guild_id, target_id))
     row = c.fetchone()
+    conn.close()
     return row[0] if row else 0
 
 def db_increment_check(guild_id, target_id):
@@ -1679,6 +1726,7 @@ def db_increment_check(guild_id, target_id):
     c.execute("UPDATE blessed_wolf_checks SET check_count=check_count+1 WHERE guild_id=? AND target_id=?",
               (guild_id, target_id))
     conn.commit()
+    conn.close()
     conn2 = sqlite3.connect(DB_FILE)
     c2    = conn2.cursor()
     c2.execute("SELECT check_count FROM blessed_wolf_checks WHERE guild_id=? AND target_id=?",
@@ -1702,6 +1750,7 @@ def db_get_npc_accusers(guild_id, npc_id):
     c.execute("SELECT accuser_id, day_num FROM npc_accusations WHERE guild_id=? AND npc_id=?",
               (guild_id, npc_id))
     rows = c.fetchall()
+    conn.close()
     return rows  # [(accuser_id, day_num), ...]
 
 # Extended HoF stat helpers
@@ -1732,6 +1781,7 @@ def db_update_seer_correct(guild_id, player_id):
     c.execute("UPDATE player_stats SET seer_correct=seer_correct+1 WHERE guild_id=? AND player_id=?",
               (guild_id, player_id))
     conn.commit()
+    conn.close()
 
 # ====================== CACHE ======================
 _state_cache = {}
@@ -1843,6 +1893,8 @@ def get_game_roles(guild_id) -> list:
     game_role_names = list(dict.fromkeys(r[1] for r in rows))  # Unique, preserve order
     all_roles       = cached_load_roles(guild_id)
     role_map        = {r["name"]: r for r in all_roles}
+    conn.close()
+
     return [role_map[n] for n in game_role_names if n in role_map]
 
 
@@ -1872,6 +1924,7 @@ def db_get_wraith_marks(guild_id) -> list:
     c    = conn.cursor()
     c.execute("SELECT marker_id, target_id, night_num FROM wraith_marks WHERE guild_id=?", (guild_id,))
     rows = c.fetchall()
+    conn.close()
     return rows
 
 def db_set_wraith_mark(guild_id, marker_id, target_id, night_num):
@@ -1913,6 +1966,7 @@ def db_get_elimination_log(guild_id):
         "FROM elimination_log WHERE guild_id=? ORDER BY eliminated_at",
         (guild_id,))
     rows = c.fetchall()
+    conn.close()
     return rows
 
 
@@ -1932,6 +1986,7 @@ def db_get_template(guild_id, name: str):
     c.execute("SELECT name, role_counts, description FROM game_templates WHERE guild_id=? AND name=?",
               (guild_id, name.lower()))
     row = c.fetchone()
+    conn.close()
     if not row:
         return None
     return {"name": row[0], "role_counts": json.loads(row[1]), "description": row[2]}
@@ -1943,6 +1998,8 @@ def db_list_templates(guild_id):
     c.execute("SELECT name, role_counts, description, created_at FROM game_templates WHERE guild_id=? ORDER BY name",
               (guild_id,))
     rows = c.fetchall()
+    conn.close()
+
     return [{"name": r[0], "role_counts": json.loads(r[1]), "description": r[2], "created_at": r[3]} for r in rows]
 
 def db_delete_template(guild_id, name: str):
@@ -2245,6 +2302,8 @@ async def refresh_hall_of_fame(guild):
         await msg.edit(embed=embed)
     except Exception as e:
         print(f"[refresh_hall_of_fame] {e}")
+    finally:
+        conn.close()
 
 def build_hall_of_fame_embed(guild, rows):
     """Pinned embed showing the top 3 players of all time with extended stats."""
@@ -2683,6 +2742,7 @@ async def _elder_convert_village(guild, guild_id: int):
                     "Their death has stripped all village roles.\n"
                     "You are now a Villager — no special ability."))
     conn.commit()
+    conn.close()
 
     # Public announcement
     announce = (
@@ -2882,13 +2942,31 @@ def _next_est_time(hour: int) -> int:
         target += timedelta(days=1)
     return int(target.timestamp())
 
+
+def _phase_end_ts(duration_secs: int, clock_hour: int) -> int:
+    """
+    Return the correct phase end timestamp.
+    Normal schedule: use the next EST clock time (8 AM or 8 PM).
+    Time Lord triggered (duration < 12h default): use now + duration instead.
+    This preserves the 8-8 schedule unless Time Lord has shortened the phase.
+    """
+    import time as _pet
+    STANDARD = 43200  # 12 hours in seconds
+    if duration_secs < STANDARD:
+        # Time Lord has halved — use relative duration, not clock
+        return int(_pet.time()) + duration_secs
+    else:
+        # Normal — snap to the next 8 AM or 8 PM EST
+        return _next_est_time(clock_hour)
+
 async def post_night_transition(guild, night_num: int, duration_secs: int):
     """Post a rich night-start embed in village-chat."""
+    import time as _pnt_t
     state  = cached_get_state(guild.id)
     vc_ch  = guild.get_channel(state.get("village_chat_ch_id") or 0)
     if not vc_ch:
         return
-    end_ts = _next_est_time(8)  # Night ends at 8 AM EST
+    end_ts = _phase_end_ts(duration_secs, 8)   # Night ends at 8 AM EST (or sooner if Time Lord)
     quote  = random.choice(NIGHT_QUOTES)
     embed  = discord.Embed(
         title       = f"🌙 Night {night_num} Begins",
@@ -2908,8 +2986,7 @@ async def post_day_transition(guild, night_num: int, duration_secs: int, deaths:
     vc_ch  = guild.get_channel(state.get("village_chat_ch_id") or 0)
     if not vc_ch:
         return
-    import time
-    end_ts = _next_est_time(20)  # Day ends at 8 PM EST
+    end_ts = _phase_end_ts(duration_secs, 20)  # Day ends at 8 PM EST (or sooner if Time Lord)
     quote  = random.choice(DAY_QUOTES)
 
     # Check if agitator frenzy was used last night
@@ -2973,8 +3050,10 @@ async def post_day_transition(guild, night_num: int, duration_secs: int, deaths:
     # NPC morning reactions
     safe_task(_npc_morning_reactions(guild, guild.id, night_num, deaths or []), "npc_morning")
 
-    # ── Auto-start day vote at 7 PM EST ───────────────────────────────────
-    end_ts_vote = _next_est_time(20)
+    # ── Auto-start day vote using day_duration from DB ──────────────────────
+    _pdt_state  = cached_get_state(guild.id)
+    _pdt_dur    = int(_pdt_state.get("day_duration") or 43200)
+    end_ts_vote = _phase_end_ts(_pdt_dur, 20)
     db_clear_day_votes(guild.id)
     db_set_state(guild.id,
                  anon_vote=0,
@@ -3125,6 +3204,7 @@ def db_add_npc_legacy_note(guild_id, name, note: str):
     c.execute("UPDATE npc_identities SET legacy_notes=? WHERE guild_id=? AND name=?",
               (_j.dumps(notes), guild_id, name))
     conn.commit()
+    conn.close()
 
 # ====================== TRACKER DB HELPERS ======================
 
@@ -3140,6 +3220,8 @@ def db_get_claim_channels(guild_id):
     c    = conn.cursor()
     c.execute("SELECT channel_id FROM claim_channels WHERE guild_id=?", (guild_id,))
     rows = c.fetchall()
+    conn.close()
+
     return [r[0] for r in rows]
 
 def db_clear_claim_channels(guild_id):
@@ -3155,6 +3237,7 @@ def db_get_tracker(guild_id, owner_id):
     c.execute("SELECT target_id, suspicion, suspected_role, notes FROM player_tracker WHERE guild_id=? AND owner_id=?",
               (guild_id, owner_id))
     rows = c.fetchall()
+    conn.close()
     return {r[0]: {"suspicion": r[1], "suspected_role": r[2], "notes": r[3]} for r in rows}
 
 def db_set_tracker_entry(guild_id, owner_id, target_id, suspicion=None, suspected_role=None, notes=None):
@@ -3174,6 +3257,7 @@ def db_get_tracker_msg(guild_id, owner_id):
     c.execute("SELECT msg_id, ch_id FROM player_tracker_msg WHERE guild_id=? AND owner_id=?",
               (guild_id, owner_id))
     row = c.fetchone()
+    conn.close()
     return row  # (msg_id, ch_id) or None
 
 def db_set_tracker_msg(guild_id, owner_id, msg_id, ch_id):
@@ -3182,6 +3266,7 @@ def db_set_tracker_msg(guild_id, owner_id, msg_id, ch_id):
     c.execute("INSERT OR REPLACE INTO player_tracker_msg VALUES (?,?,?,?)",
               (guild_id, owner_id, msg_id, ch_id))
     conn.commit()
+    conn.close()
 
 # ====================== SHADOW WOLF KILL LIST ======================
 
@@ -4004,11 +4089,12 @@ class ModDashboardView(View):
 
     async def _on_start_day(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        state     = cached_get_state(self.guild_id)
-        night_num = db_get_night_num(self.guild_id)
-        db_set_state(self.guild_id, phase="day")
-        invalidate_cache(self.guild_id)
-        await _run_start_day(interaction.guild, self.guild_id, night_num, state)
+        guild_id  = self.guild_id or interaction.guild_id
+        night_num = db_get_night_num(guild_id)
+        db_set_state(guild_id, phase="day")
+        invalidate_cache(guild_id)
+        fresh_state = cached_get_state(guild_id)
+        await _run_start_day(interaction.guild, guild_id, night_num, fresh_state)
         await update_mod_dashboard(interaction.guild)
         await interaction.followup.send("☀️ Day started.", ephemeral=True)
 
@@ -4036,14 +4122,17 @@ class ModDashboardView(View):
 
     async def _on_start_night(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
-        state     = cached_get_state(self.guild_id)
-        db_set_state(self.guild_id, phase="night")
+        guild_id  = self.guild_id or interaction.guild_id
+        state     = cached_get_state(guild_id)
+        db_set_state(guild_id, phase="night")
         if state.get("phase") == "day":
-            db_increment_night(self.guild_id)
-        invalidate_cache(self.guild_id)
-        night_num = db_get_night_num(self.guild_id)
-        duration  = state.get("night_duration", 43200)
-        await _run_start_night(interaction.guild, self.guild_id, night_num, duration, state)
+            db_increment_night(guild_id)
+        invalidate_cache(guild_id)
+        # Re-read state after invalidation so Time Lord changes are reflected
+        fresh_state = cached_get_state(guild_id)
+        night_num   = db_get_night_num(guild_id)
+        duration    = int(fresh_state.get("night_duration") or 43200)
+        await _run_start_night(interaction.guild, guild_id, night_num, duration, fresh_state)
         await update_mod_dashboard(interaction.guild)
         await interaction.followup.send("🌙 Night started.", ephemeral=True)
 
@@ -4082,7 +4171,8 @@ async def _run_start_day(guild, guild_id, night_num, state):
     actions  = db_get_night_actions(guild_id, night_num)
     frenzy   = any(a[1] == "agitator_frenzy" for a in actions)
     rows     = db_get_assignments(guild_id)
-    end_ts   = _next_est_time(20)
+    _day_dur = int(state.get("day_duration") or 43200)
+    end_ts   = _phase_end_ts(_day_dur, 20)
     anon     = state.get("anon_vote", 0)
     view     = DayVoteView(guild_id, anonymous=bool(anon))
     vc_ch    = guild.get_channel(state.get("village_chat_ch_id") or 0)
@@ -4656,6 +4746,7 @@ def _npc_game_context(guild, guild_id, npc: dict) -> str:
     c.execute("SELECT night_num, action_type, target_id FROM night_actions WHERE guild_id=? AND actor_id=? ORDER BY night_num",
               (guild_id, npc["npc_id"]))
     past_actions = c.fetchall()
+    conn.close()
     action_lines = []
     pid_name_map = {r[0]: (guild.get_member(r[0]).display_name if guild.get_member(r[0]) else str(r[0])) for r in rows}
     for n, atype, tid in past_actions:
@@ -5157,6 +5248,7 @@ async def _npc_day_vote(guild, guild_id: int, npc: dict):
 
     day_num = db_get_night_num(guild_id)
     db_set_day_vote(guild_id, npc["npc_id"], target_id, day_num)
+    db_record_vote_history(guild_id, day_num, npc["npc_id"], target_id, "vote")
     await refresh_day_vote(guild)
 
     t     = guild.get_member(target_id)
@@ -5302,6 +5394,7 @@ async def add_npc(interaction: discord.Interaction):
     c.execute("INSERT OR REPLACE INTO player_assignments VALUES (?,?,?,1,?)",
               (interaction.guild_id, npc_id, chosen_role, priv_ch.id))
     conn.commit()
+    conn.close()
 
     # ── If wolf NPC, give access to wolf-den and wolf-vote ────────────────
     if get_team(interaction.guild_id, chosen_role) == "wolf":
@@ -5393,6 +5486,7 @@ async def remove_npc(interaction: discord.Interaction, name: str):
     c.execute("DELETE FROM player_assignments WHERE guild_id=? AND player_id=?",
               (interaction.guild_id, npc["npc_id"]))
     conn.commit()
+    conn.close()
 
     _npc_webhooks.pop((interaction.guild_id, npc["npc_id"]), None)
     await refresh_player_list(interaction.guild)
@@ -5989,11 +6083,12 @@ class StartDayPromptView(View):
         guild_id  = self.guild_id
         night_num = self.night_num
         guild     = interaction.guild
-        state     = cached_get_state(guild_id) or {}
 
-        # Set phase to day
+        # Set phase to day and invalidate cache first
         db_set_state(guild_id, phase="day")
         invalidate_cache(guild_id)
+        # Re-read state fresh so Time Lord changes are reflected
+        state = cached_get_state(guild_id) or {}
 
         # Post day transition embed in village-chat
         await post_day_transition(guild, night_num,
@@ -6005,7 +6100,8 @@ class StartDayPromptView(View):
         rows     = db_get_assignments(guild_id)
         alive    = [r for r in rows if r[2] == 1]
         day_num  = night_num
-        end_ts   = _next_est_time(20)
+        _sdp_dur = int(state.get("day_duration") or 43200)
+        end_ts   = _phase_end_ts(_sdp_dur, 20)
 
         if self.frenzy:
             # Frenzy — need two votes, post extra warning
@@ -6054,6 +6150,9 @@ class StartDayPromptView(View):
         safe_task(update_mod_dashboard(guild), "dashboard_start_day")
         # Send Governor and Hermit their day ability buttons
         safe_task(_send_day_ability_buttons(guild, guild_id, end_ts), "day_ability_buttons")
+        # Vote countdown reminder and night approach warning
+        safe_task(_vote_countdown_reminder(guild, guild_id, int(end_ts)), "vote_reminder")
+        safe_task(_night_approach_warning(guild, guild_id), "night_warning")
 
 
 class DayVoteClosedPromptView(View):
@@ -6073,9 +6172,11 @@ class DayVoteClosedPromptView(View):
         db_set_state(self.guild_id, phase="night")
         if state.get("phase") == "day":
             db_increment_night(self.guild_id)
-        night_num = db_get_night_num(self.guild_id)
-        duration  = state.get("night_duration", 43200)
-        await _run_start_night(interaction.guild, self.guild_id, night_num, duration, state)
+        invalidate_cache(self.guild_id)
+        fresh_state = cached_get_state(self.guild_id)
+        night_num   = db_get_night_num(self.guild_id)
+        duration    = int(fresh_state.get("night_duration") or 43200)
+        await _run_start_night(interaction.guild, self.guild_id, night_num, duration, fresh_state)
 
 
 async def _run_start_night(guild, guild_id, night_num, duration, state):
@@ -6308,6 +6409,7 @@ async def on_ready():
     c.execute("SELECT guild_id, mod_role_id FROM game_state WHERE mod_role_id IS NOT NULL")
     for gid, rid in c.fetchall():
         _mod_role_cache[gid] = rid
+    conn.close()
     print(f"Pre-loaded mod roles for {len(_mod_role_cache)} guild(s)")
     # Load default roles for every guild the bot is in
     for guild in client.guilds:
@@ -6387,7 +6489,7 @@ async def on_ready():
                             mod_ch_ar = g.get_channel(state_ar.get("mod_log_channel_id") or 0)
                             if mod_ch_ar:
                                 await mod_ch_ar.send(
-                                    f"⏰ **Night {n} auto-resolved at 8 AM EST (bot restarted).**\n"
+                                    f"⏰ **Night {n} auto-resolved (bot restarted).**\n"
                                     f"Use `/eliminate` to apply deaths, then click Deliver Results.",
                                     view=DeliverResultsView(gid, n))
                     safe_task(_restore_auto_resolve(), "restore_auto_resolve")
@@ -6937,8 +7039,8 @@ async def set_spectator_role(interaction: discord.Interaction, role: discord.Rol
 
 # ====================== DURATION COMMANDS ======================
 class DayDurationModal(Modal, title="Set Day Phase Duration"):
-    duration = TextInput(label="Day duration in minutes (default: 720)",
-                         placeholder="e.g. 840  →  14 hours",
+    duration = TextInput(label="Day duration in minutes (default: 720 = 12h)",
+                         placeholder="e.g. 720  →  12 hours",
                          style=discord.TextStyle.short, required=True, min_length=1, max_length=4)
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -6952,8 +7054,8 @@ class DayDurationModal(Modal, title="Set Day Phase Duration"):
             await interaction.response.send_message("Please enter a valid number.", ephemeral=True)
 
 class NightDurationModal(Modal, title="Set Night Phase Duration"):
-    duration = TextInput(label="Night duration in minutes (default: 720)",
-                         placeholder="e.g. 600  →  10 hours",
+    duration = TextInput(label="Night duration in minutes (default: 720 = 12h)",
+                         placeholder="e.g. 720  →  12 hours",
                          style=discord.TextStyle.short, required=True, min_length=1, max_length=4)
     async def on_submit(self, interaction: discord.Interaction):
         try:
@@ -6979,6 +7081,7 @@ async def reload_roles(interaction: discord.Interaction):
         c.execute("INSERT OR IGNORE INTO game_roles VALUES (?,?,?,?,?)",
                   (interaction.guild_id, name, desc, cnt, team))
     conn.commit()
+    conn.close()
     invalidate_cache(interaction.guild_id)
     await interaction.response.send_message(
         f"✅ Reloaded **{len(DEFAULT_ROLES)}** default roles into the pool.",
@@ -8402,6 +8505,7 @@ async def add_player(interaction: discord.Interaction, player: discord.Member, r
     c.execute("INSERT OR REPLACE INTO player_assignments VALUES (?,?,?,1,?)",
               (interaction.guild_id, player.id, role_name, ch.id))
     conn.commit()
+    conn.close()
     invalidate_cache(interaction.guild_id)
 
     # Remove spectator role if they had it, add participant role
@@ -8478,6 +8582,7 @@ async def kick_player(interaction: discord.Interaction, player: discord.Member):
     c.execute("DELETE FROM player_assignments WHERE guild_id=? AND player_id=?",
               (interaction.guild_id, player.id))
     conn.commit()
+    conn.close()
 
     # Remove their private channel
     priv_ch = interaction.guild.get_channel(assignment[3] or 0)
@@ -9028,6 +9133,7 @@ async def _apply_role_to_player(guild, player_id: int, old_role: str, new_role: 
     c.execute("UPDATE player_assignments SET role_name=? WHERE guild_id=? AND player_id=?",
               (new_role, guild_id, player_id))
     conn.commit()
+    conn.close()
 
     player       = guild.get_member(player_id)
     wolf_ch      = guild.get_channel(state.get("wolf_channel_id") or 0)
@@ -9046,8 +9152,9 @@ async def _apply_role_to_player(guild, player_id: int, old_role: str, new_role: 
     c    = conn.cursor()
     c.execute("SELECT channel_id FROM player_assignments WHERE guild_id=? AND player_id=?",
               (guild_id, player_id))
-    row = c.fetchone()
+    row   = c.fetchone()
     ch_id = row[0] if row else None
+    conn.close()
 
     # Clear old night actions and disable stale buttons
     night_num_cl = db_get_night_num(guild_id)
@@ -9114,6 +9221,7 @@ async def assign_role(interaction: discord.Interaction, player: discord.Member, 
     c.execute("UPDATE player_assignments SET role_name=? WHERE guild_id=? AND player_id=?",
               (role, interaction.guild_id, player.id))
     conn.commit()
+    conn.close()
     invalidate_cache(interaction.guild_id)
 
     # Clear old night actions and disable stale buttons immediately
@@ -9171,6 +9279,8 @@ async def assign_role(interaction: discord.Interaction, player: discord.Member, 
 @assign_role.autocomplete("role")
 async def assign_role_autocomplete(interaction: discord.Interaction, current: str):
     roles = get_game_roles(interaction.guild_id) if game_active(interaction.guild_id) else cached_load_roles(interaction.guild_id)
+    conn.close()
+
     return [
         app_commands.Choice(name=f"{r['name']} ({r['team']})", value=r["name"])
         for r in roles
@@ -9232,6 +9342,7 @@ async def turn_player(interaction: discord.Interaction, player: discord.Member, 
     c.execute("UPDATE player_assignments SET role_name=? WHERE guild_id=? AND player_id=?",
               (new_role, interaction.guild_id, player.id))
     conn.commit()
+    conn.close()
     invalidate_cache(interaction.guild_id)
 
     # Grant wolf den access
@@ -9289,6 +9400,8 @@ async def turn_player(interaction: discord.Interaction, player: discord.Member, 
 async def turn_player_role_autocomplete(interaction: discord.Interaction, current: str):
     roles = cached_load_roles(interaction.guild_id)
     wolf_roles = [r for r in roles if r["team"] == "wolf"]
+    conn.close()
+
     return [
         app_commands.Choice(name=r["name"], value=r["name"])
         for r in wolf_roles
@@ -9445,6 +9558,7 @@ async def revive_player(interaction: discord.Interaction,
     c.execute("UPDATE player_assignments SET is_alive=1, role_name=? WHERE guild_id=? AND player_id=?",
               (new_role, interaction.guild_id, player.id))
     conn.commit()
+    conn.close()
 
     # ── Restore Discord roles ──────────────────────────────────────────────
     dead_role = interaction.guild.get_role(state.get("dead_role_id") or 0)
@@ -9577,6 +9691,7 @@ async def my_actions(interaction: discord.Interaction):
         "WHERE guild_id=? AND actor_id=? ORDER BY night_num",
         (interaction.guild_id, interaction.user.id))
     actions = c.fetchall()
+    conn.close()
 
     if not actions:
         return await interaction.followup.send("No actions submitted yet.", ephemeral=True)
@@ -9686,6 +9801,8 @@ async def list_reserves(interaction: discord.Interaction):
 @reserve_role.autocomplete("role")
 async def reserve_role_autocomplete(interaction: discord.Interaction, current: str):
     roles = cached_load_roles(interaction.guild_id)
+    conn.close()
+
     return [
         app_commands.Choice(name=f"{r['name']} ({r['team']})", value=r["name"])
         for r in roles
@@ -9838,6 +9955,10 @@ _action_cooldowns: dict = {}  # user_id -> last_used timestamp
 async def action(interaction: discord.Interaction, message: str):
     import time as _tc
     now = int(_tc.time())
+    # Prune stale entries (older than 60s) to prevent unbounded growth
+    stale = [uid for uid, ts in _action_cooldowns.items() if now - ts > 60]
+    for uid in stale:
+        _action_cooldowns.pop(uid, None)
     last = _action_cooldowns.get(interaction.user.id, 0)
     if now - last < 30:
         remaining = 30 - (now - last)
@@ -10137,7 +10258,7 @@ class VoteTargetView(View):
             if is_change:
                 prev_m    = interaction.guild.get_member(prev)
                 prev_name = prev_m.display_name if prev_m else str(prev)
-                # Record with action='change' so vote_history distinguishes flips
+                # Record change — keeps full history including the old vote
                 db_record_vote_history(
                     interaction.guild_id, day_num,
                     interaction.user.id, target_id, "change")
@@ -10156,6 +10277,11 @@ class VoteTargetView(View):
                     f"🔄 **Vote Changed — Day {day_num}**\n"
                     f"**{interaction.user.display_name}** changed vote: "
                     f"~~{prev_name}~~ \u2192 **{tname}**")
+            else:
+                # First vote — record as "vote"
+                db_record_vote_history(
+                    interaction.guild_id, day_num,
+                    interaction.user.id, target_id, "vote")
 
         await refresh_day_vote(interaction.guild)
         label = "second vote" if self.is_second_vote else "vote"
@@ -10619,7 +10745,9 @@ async def start_day_vote(interaction: discord.Interaction,
                  anon_vote=1 if anonymous else 0,
                  day_vote_msg_id=None)
     invalidate_cache(interaction.guild_id)
-    end_time = _next_est_time(20)
+    _sdv_state = cached_get_state(interaction.guild_id)
+    _sdv_dur   = int(_sdv_state.get("day_duration") or 43200)
+    end_time   = _phase_end_ts(_sdv_dur, 20)
     db_set_state(interaction.guild_id, day_vote_end_time=end_time)
 
     await refresh_day_vote(interaction.guild)
@@ -10627,12 +10755,16 @@ async def start_day_vote(interaction: discord.Interaction,
     await log_event(interaction.guild, "Day", f"🗳️ Day vote opened{vote_note}")
     await set_bot_status("☀️ Day vote open")
     await interaction.followup.send(
-        f"✅ Day vote started. Closes at 8 PM EST.{vote_note}",
+        f"✅ Day vote started. Closes at <t:{end_time}:t> (<t:{end_time}:R>).{vote_note}",
         ephemeral=True)
 
     # Send Governor and Hermit their day ability buttons
     safe_task(_send_day_ability_buttons(
         interaction.guild, interaction.guild_id, end_time), "day_ability_buttons")
+
+    # Vote countdown reminder and night approach warning
+    safe_task(_vote_countdown_reminder(interaction.guild, interaction.guild_id, int(end_time)), "vote_reminder")
+    safe_task(_night_approach_warning(interaction.guild, interaction.guild_id), "night_warning")
 
     # Trigger NPC day votes after a natural delay
     async def _run_npc_day_votes():
@@ -11304,7 +11436,7 @@ async def _eliminate_player(guild: discord.Guild, player_id: int, reason: str):
                             (outcome, guild.id, traitor_row[0]))
                 conn_t.commit()
                 conn_t.close()
-                _invalidate_cache(guild.id)
+                invalidate_cache(guild.id)
 
                 # Send wheel spin to Traitor's private channel
                 if traitor_row[3]:
@@ -11478,11 +11610,12 @@ NEUTRAL_WIN_CONDITIONS = {
 }
 
 async def check_win_condition(guild):
-    rows          = db_get_assignments(guild.id)
+    guild_id      = guild.id
+    rows          = db_get_assignments(guild_id)
     alive_rows    = [r for r in rows if r[2] == 1]
     alive_roles   = [r[1] for r in alive_rows]
-    alive_wolves  = [r for r in alive_roles if get_team(guild.id, r) == "wolf"]
-    alive_village = [r for r in alive_roles if get_team(guild.id, r) == "village"]
+    alive_wolves  = [r for r in alive_roles if get_team(guild_id, r) == "wolf"]
+    alive_village = [r for r in alive_roles if get_team(guild_id, r) == "village"]
 
     # ── Wraith win condition ─────────────────────────────────────────────
     wraith_players = [(r[0], r[2]) for r in rows if r[1] == "Wraith"]
@@ -11947,6 +12080,7 @@ async def my_stats(interaction: discord.Interaction):
     c.execute("SELECT games, wins, eliminations FROM player_stats WHERE guild_id=? AND player_id=?",
               (interaction.guild_id, interaction.user.id))
     row = c.fetchone()
+    conn.close()
     if not row or row[0] == 0:
         return await interaction.response.send_message("No stats recorded for you yet.", ephemeral=True)
     games, wins, elims = row
@@ -12236,11 +12370,14 @@ async def _vote_countdown_reminder(guild, guild_id: int, end_ts: int):
 
 
 async def _night_approach_warning(guild, guild_id: int):
-    """Post a warning 30 minutes before 8 PM EST — night is coming."""
+    """Post a warning 30 minutes before day vote closes — night is coming."""
     import time as _t
-    night_ts  = _next_est_time(20)  # 8 PM EST
-    warn_ts   = night_ts - 1800     # 30 mins before
-    wait      = warn_ts - int(_t.time())
+    state    = cached_get_state(guild_id)
+    vote_end = state.get("day_vote_end_time")
+    if not vote_end:
+        return  # No vote end time set — skip warning
+    warn_ts = int(vote_end) - 1800  # 30 mins before vote closes
+    wait    = warn_ts - int(_t.time())
 
     if wait <= 0:
         return
@@ -12256,14 +12393,15 @@ async def _night_approach_warning(guild, guild_id: int):
     if not vc_ch:
         return
 
+    vote_end_ts = state.get("day_vote_end_time") or vote_end
     night_warnings = [
-        "*Whisperfall grows quiet. The hour approaches. Make your peace.*",
-        "*The light is changing in Whisperfall. Whatever you have left to say — say it now.*",
-        "*Thirty minutes. The village will be different when the sun comes up.*",
-        "*The shadows are lengthening in the square. Night does not wait for unfinished business.*",
-        "*Something in Whisperfall knows the night is close. It has been patient. It is almost done waiting.*",
-        "*The bells will toll soon. Whatever you know, whatever you suspect — now is the time.*",
-        "*The last half hour before dark in Whisperfall always feels the same. Like a held breath.*",
+        f"*Whisperfall grows quiet. The hour approaches. Make your peace.* Vote closes <t:{vote_end_ts}:R>.",
+        f"*The light is changing in Whisperfall. Whatever you have left to say — say it now.* Vote closes <t:{vote_end_ts}:R>.",
+        f"*Thirty minutes. The village will be different when the sun comes up.* Vote closes <t:{vote_end_ts}:R>.",
+        f"*The shadows are lengthening in the square. Night does not wait for unfinished business.* Vote closes <t:{vote_end_ts}:R>.",
+        f"*Something in Whisperfall knows the night is close. It has been patient. It is almost done waiting.* Vote closes <t:{vote_end_ts}:R>.",
+        f"*The bells will toll soon. Whatever you know, whatever you suspect — now is the time.* Vote closes <t:{vote_end_ts}:R>.",
+        f"*The last half hour before dark in Whisperfall always feels the same. Like a held breath.* Vote closes <t:{vote_end_ts}:R>.",
     ]
 
     try:
@@ -15050,21 +15188,21 @@ async def start_night(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
 
     import time as _t
-    state = cached_get_state(interaction.guild_id)
+    state     = cached_get_state(interaction.guild_id)
     db_set_state(interaction.guild_id, phase="night")
     if state.get("phase") == "day":
         db_increment_night(interaction.guild_id)
     night_num = db_get_night_num(interaction.guild_id)
 
-    # Always use 8 AM EST as the end time — calculate actual seconds until then
-    night_end_ts = _next_est_time(8)
-    duration     = night_end_ts - int(_t.time())  # Seconds until 8 AM EST
-    hrs          = duration // 3600
-    mins         = (duration % 3600) // 60
+    # Use night_duration from DB (default 43200 = 12 hours), respects Time Lord changes
+    duration     = int(state.get("night_duration") or 43200)
+    night_end_ts = _phase_end_ts(duration, 8)
+    import time as _sn_t
+    actual_hrs   = (night_end_ts - int(_sn_t.time())) // 3600
 
     db_set_state(interaction.guild_id, night_end_time=night_end_ts)
     await interaction.followup.send(
-        f"🌙 Night {night_num} begins! Ends at 8 AM EST (<t:{night_end_ts}:R>)", ephemeral=True)
+        f"🌙 Night {night_num} begins! Ends at <t:{night_end_ts}:t> (<t:{night_end_ts}:R>)", ephemeral=True)
 
     # Village chat night announcement
     vc_sn = interaction.guild.get_channel(state.get("village_chat_ch_id") or 0)
@@ -15082,8 +15220,8 @@ async def start_night(interaction: discord.Interaction):
 
     await _run_start_night(interaction.guild, interaction.guild_id, night_num, duration, state)
 
-    # Auto-resolve at 8 AM EST
-    guild_snap   = interaction.guild
+    # Auto-resolve after duration
+    guild_snap    = interaction.guild
     guild_id_snap = interaction.guild_id
     async def _auto_resolve_night():
         import time as _t2
@@ -15099,7 +15237,7 @@ async def start_night(interaction: discord.Interaction):
             mod_ch_ar = guild_snap.get_channel(state_ar.get("mod_log_channel_id") or 0)
             if mod_ch_ar:
                 await mod_ch_ar.send(
-                    f"⏰ **Night {night_num} auto-resolved at 8 AM EST.**\n"
+                    f"⏰ **Night {night_num} auto-resolved (timer expired).**\n"
                     f"Use `/eliminate` to apply deaths, then click Deliver Results.",
                     view=DeliverResultsView(guild_id_snap, night_num))
     safe_task(_auto_resolve_night(), "auto_resolve_night")
@@ -15616,6 +15754,12 @@ async def resolve_night(guild: discord.Guild, night_num: int):
     """Mark phase as day, clear bond, notify mod — mod handles all resolution manually."""
     guild_id = guild.id
 
+    # Guard against double-resolve — if already day, bail out silently
+    current_phase = (db_get_state(guild_id) or {}).get("phase")
+    if current_phase == "day":
+        print(f"[resolve_night] guild {guild_id} already in day phase — skipping duplicate resolve")
+        return
+
     db_set_state(guild_id, phase="day")
     db_clear_cupid_current(guild_id)
 
@@ -15881,6 +16025,7 @@ async def log_turn_result(interaction: discord.Interaction, player: discord.Memb
         c.execute("UPDATE turn_log SET result=? WHERE guild_id=? AND entry_id=?",
                   (result, interaction.guild_id, max_eid))
     conn.commit()
+    conn.close()
     result_pretty = result.replace("_", " ").title()
     await post_mod_log(interaction.guild,
         f"**Turn Result** \N{EM DASH} Night {night_num}\n"
@@ -15989,52 +16134,99 @@ async def vote_history(interaction: discord.Interaction, player: discord.Member 
     await interaction.response.defer(ephemeral=True)
     rows    = db_get_vote_history(interaction.guild_id)
     assigns = db_get_assignments(interaction.guild_id)
+    npcs    = db_get_npcs(interaction.guild_id)
+    npc_map = {n["npc_id"]: n["name"] for n in npcs}
+
+    def get_name(pid):
+        if pid is None: return "Abstain"
+        npc = npc_map.get(pid)
+        if npc: return npc
+        m = interaction.guild.get_member(pid)
+        return m.display_name if m else str(pid)
+
+    # Build pid_to_name including assignment members and NPCs
     pid_to_name = {}
     for pid, _, _, _ in assigns:
-        m = interaction.guild.get_member(pid)
-        pid_to_name[pid] = m.display_name if m else str(pid)
+        pid_to_name[pid] = get_name(pid)
+    for npc_id, name in npc_map.items():
+        pid_to_name[npc_id] = name
 
     if player:
         rows = [r for r in rows if r[1] == player.id]
-    # Ensure all rows have at least 6 elements
+
+    # Pad rows to 6 fields
     rows = [r + (0,) * (6 - len(r)) if len(r) < 6 else r for r in rows]
+
     if not rows:
         return await interaction.followup.send("No vote history recorded yet.", ephemeral=True)
 
+    # Group by day — preserve insertion order (entry_id order from DB)
     by_day = {}
     for row in rows:
-        day_num      = row[0]
-        voter_id     = row[1]
-        target_id    = row[2]
-        action       = row[3]
-        voted_at     = row[4] if len(row) > 4 else 0
-        change_count = row[5] if len(row) > 5 else 0
-        by_day.setdefault(day_num, []).append((voter_id, target_id, action, voted_at, change_count))
+        day_num, voter_id, target_id, action, voted_at, change_count = row
+        by_day.setdefault(day_num, []).append(row)
 
     for day_num in sorted(by_day.keys())[:10]:
-        embed = discord.Embed(title=f"Day {day_num} Vote History", color=0x5865F2)
+        day_rows = by_day[day_num]
+        embed = discord.Embed(
+            title = f"☀️ Day {day_num} — Complete Vote Log",
+            color = 0x5865F2
+        )
+
+        # Group chronologically per voter to show their full timeline
+        voter_timeline = {}  # voter_id -> list of (target_id, action, voted_at)
+        for _, voter_id, target_id, action, voted_at, change_count in day_rows:
+            voter_timeline.setdefault(voter_id, []).append((target_id, action, voted_at))
+
         lines = []
-        # Track per-voter change counts for summary
-        voter_changes = {}
-        for voter_id, target_id, action, voted_at, change_count in by_day[day_num]:
-            voter  = pid_to_name.get(voter_id, str(voter_id))
-            ts_str = f" <t:{voted_at}:t>" if voted_at else ""
-            change_badge = f" *(change #{change_count})*" if change_count > 0 else ""
-            voter_changes[voter] = max(voter_changes.get(voter, 0), change_count)
-            if action == "abstain" or target_id is None:
-                lines.append(f"**{voter}** → Abstain{ts_str}{change_badge}")
+        changers = []  # voters who changed their vote
+
+        for voter_id, events in voter_timeline.items():
+            voter_name = pid_to_name.get(voter_id, str(voter_id))
+            if len(events) == 1:
+                # Single vote — simple line
+                target_id, action, voted_at = events[0]
+                ts = f" <t:{voted_at}:t>" if voted_at else ""
+                if action == "abstain" or target_id is None:
+                    lines.append(f"**{voter_name}** → 🤐 Abstain{ts}")
+                else:
+                    lines.append(f"**{voter_name}** → **{pid_to_name.get(target_id, str(target_id))}**{ts}")
             else:
-                target = pid_to_name.get(target_id, str(target_id))
-                lines.append(f"**{voter}** → **{target}**{ts_str}{change_badge}")
+                # Multiple events — show full chain
+                parts = []
+                for target_id, action, voted_at in events:
+                    ts = f"<t:{voted_at}:t>" if voted_at else ""
+                    if action == "abstain" or target_id is None:
+                        parts.append(f"🤐 Abstain {ts}".strip())
+                    elif action == "change":
+                        parts.append(f"🔄 **{pid_to_name.get(target_id, str(target_id))}** {ts}".strip())
+                    else:
+                        parts.append(f"**{pid_to_name.get(target_id, str(target_id))}** {ts}".strip())
+                lines.append(f"**{voter_name}**: {' → '.join(parts)}")
+                changers.append(voter_name)
 
-        # Add flip summary at bottom
-        flippers = [(v, c) for v, c in voter_changes.items() if c > 0]
-        flippers.sort(key=lambda x: -x[1])
+        # Find players who never voted
+        alive_pids = {r[0] for r in assigns if r[2] == 1}
+        voted_pids = set(voter_timeline.keys())
+        never_voted = [pid_to_name.get(p, str(p)) for p in alive_pids
+                       if p not in voted_pids and p not in npc_map]
 
-        embed.description = "\n".join(lines) or "No votes this day."
-        if flippers:
-            flip_summary = ", ".join(f"**{v}** ({c} change{'s' if c > 1 else ''})" for v, c in flippers[:5])
-            embed.add_field(name="🔄 Vote Changes", value=flip_summary, inline=False)
+        embed.description = "\n".join(lines) if lines else "*No votes cast this day.*"
+
+        if changers:
+            embed.add_field(
+                name  = "🔄 Changed Votes",
+                value = ", ".join(changers),
+                inline= False
+            )
+        if never_voted:
+            embed.add_field(
+                name  = "⚠️ Did Not Vote",
+                value = ", ".join(sorted(never_voted)),
+                inline= False
+            )
+
+        embed.set_footer(text=f"Day {day_num} · {len(voter_timeline)} player(s) voted · arrows show changes in order")
         await interaction.followup.send(embed=embed, ephemeral=True)
 
 
@@ -16418,6 +16610,9 @@ def db_get_night_order(guild_id, night_num):
     c.execute("SELECT role_order FROM night_order WHERE guild_id=? AND night_num=?",
               (guild_id, night_num))
     row = c.fetchone()
+    conn.close()
+    conn.close()
+
     return json.loads(row[0]) if row and row[0] else []
 
 class SpinWheelView(View):
@@ -16738,6 +16933,7 @@ async def swap_roles(interaction: discord.Interaction,
     c.execute("UPDATE player_assignments SET role_name=? WHERE guild_id=? AND player_id=?",
               (role1, interaction.guild_id, player2.id))
     conn.commit()
+    conn.close()
     invalidate_cache(interaction.guild_id)
 
     # Handle team changes for both players
@@ -16946,6 +17142,69 @@ async def modcheck(interaction: discord.Interaction, full: bool = False):
                         value=f"{elim_count}/2 eliminations done", inline=False)
     wolves_needed = max(0, village_c - wolf_c)
     embed.add_field(name="Wolves need", value=f"{wolves_needed} more elim(s) to win", inline=False)
+
+    # ── Extra state flags ───────────────────────────────────────────────────
+    flags = []
+
+    # Time Lord status
+    tl = next((r for r in alive if r[1] == "Time Lord"), None)
+    night_dur = state.get("night_duration", 43200)
+    day_dur   = state.get("day_duration", 43200)
+    if tl:
+        m_tl = interaction.guild.get_member(tl[0])
+        flags.append(f"⏰ **Time Lord** alive ({m_tl.display_name if m_tl else tl[0]}) — phases still {night_dur//3600:.0f}h/{day_dur//3600:.0f}h")
+    elif night_dur < 43200:
+        flags.append(f"⏰ Time Lord is dead — phases shortened to {night_dur//3600:.0f}h night / {day_dur//3600:.0f}h day")
+
+    # Alpha / Elite Alpha turns remaining
+    for r in alive:
+        if r[1] == "Alpha":
+            conn_a = sqlite3.connect(DB_FILE)
+            c_a    = conn_a.cursor()
+            c_a.execute("SELECT COUNT(*) FROM turn_log WHERE guild_id=? AND actor_id=? AND result=?",
+                        (interaction.guild_id, r[0], "success"))
+            used_a = c_a.fetchone()[0]
+            conn_a.close()
+            m_a = interaction.guild.get_member(r[0])
+            remaining = 1 - used_a
+            flags.append(f"👑 **Alpha** ({m_a.display_name if m_a else r[0]}) — {remaining} turn(s) remaining")
+        elif r[1] == "Elite Alpha":
+            conn_ea = sqlite3.connect(DB_FILE)
+            c_ea    = conn_ea.cursor()
+            c_ea.execute("SELECT night_num FROM turn_log WHERE guild_id=? AND actor_id=? AND result=? ORDER BY night_num",
+                         (interaction.guild_id, r[0], "success"))
+            ea_turns = [row[0] for row in c_ea.fetchall()]
+            conn_ea.close()
+            m_ea = interaction.guild.get_member(r[0])
+            remaining = 2 - len(ea_turns)
+            last_night = f", last used Night {ea_turns[-1]}" if ea_turns else ""
+            flags.append(f"👑⭐ **Elite Alpha** ({m_ea.display_name if m_ea else r[0]}) — {remaining} turn(s) remaining{last_night}")
+
+    # Wraith status
+    wraith_rows = [r for r in alive if r[1] == "Wraith"]
+    if wraith_rows:
+        from discord import utils as _du
+        wraith_state = db_get_state(interaction.guild_id) or {}
+        w_names = []
+        for wr in wraith_rows:
+            m_w = interaction.guild.get_member(wr[0])
+            w_names.append(m_w.display_name if m_w else str(wr[0]))
+        flags.append(f"👻 **Wraiths** alive: {', '.join(w_names)} — need to outnumber village ({village_c}) AND wolves ({wolf_c})")
+
+    # White Wolf strikes
+    conn_ww = sqlite3.connect(DB_FILE)
+    c_ww    = conn_ww.cursor()
+    c_ww.execute("SELECT player_id, strikes FROM white_wolf_strikes WHERE guild_id=?",
+                 (interaction.guild_id,))
+    ww_rows = c_ww.fetchall()
+    conn_ww.close()
+    for ww_pid, ww_strikes in ww_rows:
+        m_ww = interaction.guild.get_member(ww_pid)
+        ww_name = m_ww.display_name if m_ww else str(ww_pid)
+        flags.append(f"🤍 **White Wolf** ({ww_name}) — {ww_strikes}/3 strikes")
+
+    if flags:
+        embed.add_field(name="🔍 State Flags", value="\n".join(flags), inline=False)
 
     if full:
         # Full team breakdown — show who is who
@@ -17805,6 +18064,7 @@ async def history(interaction: discord.Interaction):
         LIMIT 10
     """, (interaction.guild_id,))
     games = c.fetchall()
+    conn.close()
 
     if not games:
         return await interaction.followup.send(
@@ -18091,6 +18351,7 @@ async def setup_hall_of_fame(interaction: discord.Interaction, channel: discord.
     c.execute("INSERT OR REPLACE INTO hall_of_fame VALUES (?,?,?)",
               (interaction.guild_id, channel.id, msg.id))
     conn.commit()
+    conn.close()
     await interaction.followup.send(
         f"✅ Hall of Fame pinned in {channel.mention}. It will update automatically after every game.",
         ephemeral=True)
@@ -18325,6 +18586,8 @@ async def roleinfo(interaction: discord.Interaction, role: str):
 @roleinfo.autocomplete("role")
 async def roleinfo_autocomplete(interaction: discord.Interaction, current: str):
     roles = get_game_roles(interaction.guild_id) if game_active(interaction.guild_id) else cached_load_roles(interaction.guild_id)
+    conn.close()
+
     return [
         app_commands.Choice(
             name=f"{r['name']} ({'🐺' if r['team']=='wolf' else '⚖️' if r['team']=='neutral' else '🏘️'})",
@@ -18594,6 +18857,85 @@ async def den_brief(interaction: discord.Interaction):
     await interaction.followup.send("✅ Den brief posted to wolf den.", ephemeral=True)
 
 
+@tree.command(name="rules", description="How to play — core Mafia/Werewolf rules for Whisperfall")
+async def rules(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title       = "📖 How to Play — Whisperfall",
+        description = (
+            "Whisperfall is a social deduction game. "
+            "Wolves hide among the village. "
+            "The village must find and eliminate them before they're outnumbered."
+        ),
+        color = 0x2C3060
+    )
+    embed.add_field(
+        name  = "🏘️ The Village",
+        value = (
+            "You are a villager. You don't know who the wolves are.\n"
+            "Each **day**, the village votes to eliminate one player.\n"
+            "Some villagers have special abilities — your role card explains yours.\n"
+            "**Village wins** when all wolves are eliminated."
+        ),
+        inline=False)
+    embed.add_field(
+        name  = "🐺 The Wolves",
+        value = (
+            "Wolves know each other. Each **night**, they secretly vote to kill a villager.\n"
+            "During the day, wolves must blend in — lie, deflect, and avoid suspicion.\n"
+            "**Wolves win** when they equal or outnumber the remaining villagers."
+        ),
+        inline=False)
+    embed.add_field(
+        name  = "🌙 Night Phase",
+        value = (
+            "When night falls, a button appears in your **private channel**.\n"
+            "Submit your night action using that button.\n"
+            "If you have no ability, click **Pass** or wait — the mod handles the rest.\n"
+            "Night lasts **12 hours** (8 PM → 8 AM EST)."
+        ),
+        inline=False)
+    embed.add_field(
+        name  = "☀️ Day Phase",
+        value = (
+            "Discussion happens in **village-chat**. Accuse, defend, read the room.\n"
+            "Cast your vote in **day-vote** using the vote button.\n"
+            "The player with the most votes at close is eliminated.\n"
+            "Day lasts **12 hours** (8 AM → 8 PM EST)."
+        ),
+        inline=False)
+    embed.add_field(
+        name  = "⚖️ Neutral Roles",
+        value = (
+            "Some roles belong to neither side. "
+            "They have their own win conditions — read your role card carefully.\n"
+            "A neutral player can win alongside the village or wolves, or alone."
+        ),
+        inline=False)
+    embed.add_field(
+        name  = "📋 Key Commands",
+        value = (
+            "`/my_role` — see your secret role card\n"
+            "`/roleinfo <role>` — full details on any role\n"
+            "`/time_left` — check how long remains in the current phase\n"
+            "`/pass_night` — tell the mod you have no action tonight\n"
+            "`/action <message>` — send a private message to the mod team\n"
+            "`/vote_history` — see all votes cast today\n"
+            "`/tracker` — open your personal investigation notes"
+        ),
+        inline=False)
+    embed.add_field(
+        name  = "💡 Tips",
+        value = (
+            "• **Don't reveal your role publicly** — even village roles benefit from secrecy.\n"
+            "• **Vote every day** — missing votes has consequences.\n"
+            "• **Watch behaviour patterns** — who defends wolves? Who votes suspiciously?\n"
+            "• **Use `/action`** to communicate privately with the mod at any time."
+        ),
+        inline=False)
+    embed.set_footer(text="Use /roleinfo to look up any specific role. Use /villagehelp to browse all commands.")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
 @tree.command(name="villagehelp", description="Browse all VillageAid commands by category")
 async def help_cmd(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -18679,7 +19021,7 @@ async def setup_guide(interaction: discord.Interaction):
             "3. Build your role roster (pick any combo of the 45 built-in roles)\n"
             "4. Confirm — the bot creates all channels and deals roles privately\n\n"
             "The game starts on **Night 1** automatically.\n"
-            "Day phase runs **8 AM – 8 PM EST**. Night phase runs **8 PM – 8 AM EST**."
+            "Day phase runs **12 hours** (configurable via `/set_day_duration`). Night phase runs **12 hours** (configurable via `/set_night_duration`). Time Lord death halves both."
         ),
         inline=False
     )
