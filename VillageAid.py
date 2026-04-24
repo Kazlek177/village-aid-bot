@@ -509,6 +509,12 @@ def init_db():
     except Exception:
         pass
 
+    # Time Lord death flag
+    try:
+        c.execute("ALTER TABLE game_state ADD COLUMN time_lord_triggered INTEGER DEFAULT 0")
+    except Exception:
+        pass
+
     # Game recap storage — elimination log
     c.execute('''CREATE TABLE IF NOT EXISTS elimination_log (
                     guild_id    INTEGER,
@@ -792,17 +798,16 @@ DEFAULT_ROLES = [
 ]
 
 def load_default_roles(guild_id):
-    """Insert default roles for a guild only if they have no roles saved yet."""
+    """Ensure all default roles exist for a guild — adds missing ones without removing custom ones."""
     conn = sqlite3.connect(DB_FILE)
     c    = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM game_roles WHERE guild_id=?", (guild_id,))
-    count = c.fetchone()[0]
-    if count == 0:
-        for name, team, cnt, desc in DEFAULT_ROLES:
-            c.execute("INSERT OR IGNORE INTO game_roles VALUES (?,?,?,?,?)",
-                      (guild_id, name, desc, cnt, team))
-        conn.commit()
-        conn.close()
+    # Always INSERT OR IGNORE — safe for both new and existing guilds.
+    # New guilds get all defaults. Existing guilds get any missing ones added.
+    for name, team, cnt, desc in DEFAULT_ROLES:
+        c.execute("INSERT OR IGNORE INTO game_roles VALUES (?,?,?,?,?)",
+                  (guild_id, name, desc, cnt, team))
+    conn.commit()
+    conn.close()
     invalidate_cache(guild_id)
 
 # ====================== UNICODE FONT SYSTEM ======================
@@ -2943,20 +2948,23 @@ def _next_est_time(hour: int) -> int:
     return int(target.timestamp())
 
 
-def _phase_end_ts(duration_secs: int, clock_hour: int) -> int:
+def _phase_end_ts(duration_secs: int, clock_hour: int, guild_id: int = None) -> int:
     """
     Return the correct phase end timestamp.
-    Normal schedule: use the next EST clock time (8 AM or 8 PM).
-    Time Lord triggered (duration < 12h default): use now + duration instead.
-    This preserves the 8-8 schedule unless Time Lord has shortened the phase.
+    Normal: snap to the next EST clock time (8 AM or 8 PM).
+    Time Lord triggered: use now + duration instead.
+    Uses the time_lord_triggered flag in game_state, not duration magnitude.
     """
     import time as _pet
-    STANDARD = 43200  # 12 hours in seconds
-    if duration_secs < STANDARD:
-        # Time Lord has halved — use relative duration, not clock
+    # Check if Time Lord has died this game
+    tl_triggered = False
+    if guild_id:
+        state = db_get_state(guild_id) or {}
+        tl_triggered = bool(state.get("time_lord_triggered", 0))
+
+    if tl_triggered:
         return int(_pet.time()) + duration_secs
     else:
-        # Normal — snap to the next 8 AM or 8 PM EST
         return _next_est_time(clock_hour)
 
 async def post_night_transition(guild, night_num: int, duration_secs: int):
@@ -2966,7 +2974,7 @@ async def post_night_transition(guild, night_num: int, duration_secs: int):
     vc_ch  = guild.get_channel(state.get("village_chat_ch_id") or 0)
     if not vc_ch:
         return
-    end_ts = _phase_end_ts(duration_secs, 8)   # Night ends at 8 AM EST (or sooner if Time Lord)
+    end_ts = _phase_end_ts(duration_secs, 8, guild.id)   # Night ends at 8 AM EST (or sooner if Time Lord)
     quote  = random.choice(NIGHT_QUOTES)
     embed  = discord.Embed(
         title       = f"🌙 Night {night_num} Begins",
@@ -2986,7 +2994,7 @@ async def post_day_transition(guild, night_num: int, duration_secs: int, deaths:
     vc_ch  = guild.get_channel(state.get("village_chat_ch_id") or 0)
     if not vc_ch:
         return
-    end_ts = _phase_end_ts(duration_secs, 20)  # Day ends at 8 PM EST (or sooner if Time Lord)
+    end_ts = _phase_end_ts(duration_secs, 20, guild.id)  # Day ends at 8 PM EST (or sooner if Time Lord)
     quote  = random.choice(DAY_QUOTES)
 
     # Check if agitator frenzy was used last night
@@ -3053,7 +3061,7 @@ async def post_day_transition(guild, night_num: int, duration_secs: int, deaths:
     # ── Auto-start day vote using day_duration from DB ──────────────────────
     _pdt_state  = cached_get_state(guild.id)
     _pdt_dur    = int(_pdt_state.get("day_duration") or 43200)
-    end_ts_vote = _phase_end_ts(_pdt_dur, 20)
+    end_ts_vote = _phase_end_ts(_pdt_dur, 20, guild.id)
     db_clear_day_votes(guild.id)
     db_set_state(guild.id,
                  anon_vote=0,
@@ -4172,7 +4180,7 @@ async def _run_start_day(guild, guild_id, night_num, state):
     frenzy   = any(a[1] == "agitator_frenzy" for a in actions)
     rows     = db_get_assignments(guild_id)
     _day_dur = int(state.get("day_duration") or 43200)
-    end_ts   = _phase_end_ts(_day_dur, 20)
+    end_ts   = _phase_end_ts(_day_dur, 20, guild_id)
     anon     = state.get("anon_vote", 0)
     view     = DayVoteView(guild_id, anonymous=bool(anon))
     vc_ch    = guild.get_channel(state.get("village_chat_ch_id") or 0)
@@ -6101,7 +6109,7 @@ class StartDayPromptView(View):
         alive    = [r for r in rows if r[2] == 1]
         day_num  = night_num
         _sdp_dur = int(state.get("day_duration") or 43200)
-        end_ts   = _phase_end_ts(_sdp_dur, 20)
+        end_ts   = _phase_end_ts(_sdp_dur, 20, guild_id)
 
         if self.frenzy:
             # Frenzy — need two votes, post extra warning
@@ -7711,11 +7719,13 @@ class ConfirmStartView(View):
 
         # player-list
         player_list_ow = {everyone: read_ow, bot_me: bot_ow}
+        if mod_role:  player_list_ow[mod_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
         if spec_role: player_list_ow[spec_role] = read_ow
         player_list_ch = await category.create_text_channel(ch_name("player-list",  font, "📋"), overwrites=player_list_ow)
 
         # role-list
         role_list_ow = {everyone: read_ow, bot_me: bot_ow}
+        if mod_role:  role_list_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
         if spec_role: role_list_ow[spec_role] = read_ow
         role_list_ch = await category.create_text_channel(ch_name("role-list",    font, "📜"), overwrites=role_list_ow)
 
@@ -7787,17 +7797,20 @@ class ConfirmStartView(View):
         # We suppress their actual messages via the bot; the channel stays visually clean
         part_ow_vote = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
         day_vote_ow  = {everyone: read_ow, bot_me: bot_ow}
-        if p_role: day_vote_ow[p_role] = part_ow_vote
-        if spec_role: day_vote_ow[spec_role]  = part_ow_vote
+        if mod_role:  day_vote_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
+        if p_role:    day_vote_ow[p_role]    = part_ow_vote
+        if spec_role: day_vote_ow[spec_role] = part_ow_vote
         day_vote_ch = await category.create_text_channel(ch_name("day-vote",     font, "🗳️"), overwrites=day_vote_ow)
 
         # timeline
         timeline_ow = {everyone: read_ow, bot_me: bot_ow}
+        if mod_role:  timeline_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
         if spec_role: timeline_ow[spec_role] = read_ow
         timeline_ch = await category.create_text_channel(ch_name("timeline",     font, "⏰"), overwrites=timeline_ow)
 
         # stats
         stats_ow = {everyone: read_ow, bot_me: bot_ow}
+        if mod_role:  stats_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
         if spec_role: stats_ow[spec_role] = read_ow
         stats_ch = await category.create_text_channel(ch_name("stats",        font, "📊"), overwrites=stats_ow)
 
@@ -7818,6 +7831,7 @@ class ConfirmStartView(View):
                         and assignments[p.id] not in DENY_DEN]
         neutral_players = [p for p in players if get_team(interaction.guild_id, assignments[p.id]) == "neutral"]
         wolf_ow = {everyone: discord.PermissionOverwrite(view_channel=False), bot_me: bot_ow}
+        if mod_role:  wolf_ow[mod_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
         for wp in wolf_players:
             wolf_ow[wp] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
         if spec_role: wolf_ow[spec_role] = read_ow
@@ -7831,6 +7845,7 @@ class ConfirmStartView(View):
 
         # ghost-chat
         ghost_ow = {everyone: discord.PermissionOverwrite(view_channel=False), bot_me: bot_ow}
+        if mod_role:  ghost_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
         if spec_role: ghost_ow[spec_role] = read_ow
         ghost_ch = await category.create_text_channel(ch_name("ghost-chat",   font, "👻"), overwrites=ghost_ow)
 
@@ -8217,7 +8232,8 @@ class ConfirmStartView(View):
             mod_dashboard_msg_id=None,
             night_bb_done=0,
             day_bb_done=0,
-            investigations_done=0
+            investigations_done=0,
+            time_lord_triggered=0
         )
 
         # Timeline embed
@@ -10747,7 +10763,7 @@ async def start_day_vote(interaction: discord.Interaction,
     invalidate_cache(interaction.guild_id)
     _sdv_state = cached_get_state(interaction.guild_id)
     _sdv_dur   = int(_sdv_state.get("day_duration") or 43200)
-    end_time   = _phase_end_ts(_sdv_dur, 20)
+    end_time   = _phase_end_ts(_sdv_dur, 20, interaction.guild_id)
     db_set_state(interaction.guild_id, day_vote_end_time=end_time)
 
     await refresh_day_vote(interaction.guild)
@@ -11386,7 +11402,9 @@ async def _eliminate_player(guild: discord.Guild, player_id: int, reason: str):
         day_dur     = state_cur.get("day_duration", 43200)
         new_night   = max(3600,  night_dur // 2)
         new_day     = max(7200,  day_dur   // 2)
-        db_set_state(guild.id, night_duration=new_night, day_duration=new_day)
+        db_set_state(guild.id, night_duration=new_night, day_duration=new_day,
+                     time_lord_triggered=1)
+        invalidate_cache(guild.id)
         msg = (f"⏰ **Time Lord eliminated — clocks accelerated!**\n"
                f"Night duration: {night_dur//3600:.1f}h → {new_night//3600:.1f}h\n"
                f"Day duration:   {day_dur//3600:.1f}h → {new_day//3600:.1f}h\n"
@@ -15196,7 +15214,7 @@ async def start_night(interaction: discord.Interaction):
 
     # Use night_duration from DB (default 43200 = 12 hours), respects Time Lord changes
     duration     = int(state.get("night_duration") or 43200)
-    night_end_ts = _phase_end_ts(duration, 8)
+    night_end_ts = _phase_end_ts(duration, 8, interaction.guild_id)
     import time as _sn_t
     actual_hrs   = (night_end_ts - int(_sn_t.time())) // 3600
 
@@ -17148,13 +17166,14 @@ async def modcheck(interaction: discord.Interaction, full: bool = False):
 
     # Time Lord status
     tl = next((r for r in alive if r[1] == "Time Lord"), None)
-    night_dur = state.get("night_duration", 43200)
-    day_dur   = state.get("day_duration", 43200)
+    night_dur    = state.get("night_duration", 43200)
+    day_dur      = state.get("day_duration", 43200)
+    tl_triggered = bool(state.get("time_lord_triggered", 0))
     if tl:
         m_tl = interaction.guild.get_member(tl[0])
-        flags.append(f"⏰ **Time Lord** alive ({m_tl.display_name if m_tl else tl[0]}) — phases still {night_dur//3600:.0f}h/{day_dur//3600:.0f}h")
-    elif night_dur < 43200:
-        flags.append(f"⏰ Time Lord is dead — phases shortened to {night_dur//3600:.0f}h night / {day_dur//3600:.0f}h day")
+        flags.append(f"⏰ **Time Lord** alive ({m_tl.display_name if m_tl else tl[0]}) — phases still 12h/12h (8-8 EST)")
+    elif tl_triggered:
+        flags.append(f"⏰ Time Lord is dead — phases shortened to {night_dur//3600:.0f}h night / {day_dur//3600:.0f}h day (relative timers active)")
 
     # Alpha / Elite Alpha turns remaining
     for r in alive:
@@ -19021,7 +19040,7 @@ async def setup_guide(interaction: discord.Interaction):
             "3. Build your role roster (pick any combo of the 45 built-in roles)\n"
             "4. Confirm — the bot creates all channels and deals roles privately\n\n"
             "The game starts on **Night 1** automatically.\n"
-            "Day phase runs **12 hours** (configurable via `/set_day_duration`). Night phase runs **12 hours** (configurable via `/set_night_duration`). Time Lord death halves both."
+            "Day phase runs **8 AM – 8 PM EST**. Night phase runs **8 PM – 8 AM EST**. Time Lord death halves both and switches to relative timers."
         ),
         inline=False
     )
