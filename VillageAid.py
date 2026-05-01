@@ -629,7 +629,6 @@ def init_db():
         pass
 
     conn.commit()
-    conn.close()
 
 init_db()
 
@@ -1521,7 +1520,6 @@ def db_get_npcs(guild_id):
         d["memory_summary"]= d["memory_summary"] or ""
         d["pinned_events"] = json.loads(d["pinned_events"] or "[]")
         result.append(d)
-    conn.close()
     return result
 
 
@@ -1577,7 +1575,6 @@ def db_update_npc_relationship(guild_id, npc_id, name: str, rel_type: str):
                   (_jr.dumps(current), guild_id, npc_id))
         conn.commit()
         conn.close()
-    conn.close()
 
 def db_update_npc_suspicions(guild_id, npc_id, suspicions: list):
     import json
@@ -1898,8 +1895,6 @@ def get_game_roles(guild_id) -> list:
     game_role_names = list(dict.fromkeys(r[1] for r in rows))  # Unique, preserve order
     all_roles       = cached_load_roles(guild_id)
     role_map        = {r["name"]: r for r in all_roles}
-    conn.close()
-
     return [role_map[n] for n in game_role_names if n in role_map]
 
 
@@ -2206,15 +2201,24 @@ def build_day_vote_embed(guild, votes, rows, end_time=None, anonymous=False):
     embed.set_footer(text=f"{len(votes)}/{alive_count} alive players have responded")
     return embed
 
-def build_wolf_vote_embed(guild, wolf_votes, alive_players, wolf_player_ids, night_num):
+def build_wolf_vote_embed(guild, wolf_votes, alive_players, wolf_player_ids, night_num,
+                          den_channel=None):
     pid_to_name = {p.id: p.display_name for p in alive_players}
+
+    # Only count wolves who can actually see the den
+    if den_channel:
+        voting_wolf_ids = [wid for wid in wolf_player_ids
+                           if den_channel.permissions_for(guild.get_member(wid) or guild.me).view_channel]
+    else:
+        voting_wolf_ids = wolf_player_ids
+
     tally = {}
     for voter_id, target_id in wolf_votes:
         m = guild.get_member(voter_id)
         tally.setdefault(target_id, []).append(m.display_name if m else str(voter_id))
 
     voted_wolves = {v for v, _ in wolf_votes}
-    not_voted    = [guild.get_member(wid) for wid in wolf_player_ids if wid not in voted_wolves]
+    not_voted    = [wid for wid in voting_wolf_ids if wid not in voted_wolves]
     total_votes  = sum(len(v) for v in tally.values())
 
     embed = discord.Embed(
@@ -2239,9 +2243,11 @@ def build_wolf_vote_embed(guild, wolf_votes, alive_players, wolf_player_ids, nig
         embed.add_field(name="No votes yet", value="Use the dropdown below.", inline=False)
 
     if not_voted:
-        embed.add_field(name="⏳ Waiting on", value=", ".join(m.display_name for m in not_voted if m), inline=False)
+        names = [guild.get_member(wid).display_name if guild.get_member(wid) else str(wid)
+                 for wid in not_voted]
+        embed.add_field(name="⏳ Waiting on", value=", ".join(names), inline=False)
 
-    embed.set_footer(text=f"{len(voted_wolves)}/{len(wolf_player_ids)} wolves have voted")
+    embed.set_footer(text=f"{len(voted_wolves)}/{len(voting_wolf_ids)} wolves have voted")
     return embed
 
 def build_timeline_embed(guild_id, state):
@@ -2361,7 +2367,6 @@ def build_hall_of_fame_embed(guild, rows):
             inline=False
         )
 
-    conn.close()
 
     # Special records — scoped to this guild
     conn2 = sqlite3.connect(DB_FILE)
@@ -2747,7 +2752,6 @@ async def _elder_convert_village(guild, guild_id: int):
                     "Their death has stripped all village roles.\n"
                     "You are now a Villager — no special ability."))
     conn.commit()
-    conn.close()
 
     # Public announcement
     announce = (
@@ -3653,7 +3657,8 @@ async def refresh_wolf_vote(guild, night_num):
     alive_players = [guild.get_member(r[0]) for r in rows if r[2] == 1]
     alive_players = [p for p in alive_players if p]
     wolf_votes    = db_get_wolf_votes(guild.id, night_num)
-    embed = build_wolf_vote_embed(guild, wolf_votes, alive_players, wolf_ids, night_num)
+    embed = build_wolf_vote_embed(guild, wolf_votes, alive_players, wolf_ids, night_num,
+                                  den_channel=ch)
     # Build a fresh view then patch options with real names + alive/dead status
     view = WolfVoteView(guild.id, night_num)
     if hasattr(view, "_sel"):
@@ -6335,7 +6340,8 @@ async def _run_start_night(guild, guild_id, night_num, duration, state):
             if patched:
                 view._sel.options = patched
         wolf_votes = db_get_wolf_votes(guild_id, night_num)
-        embed      = build_wolf_vote_embed(guild, wolf_votes, alive_players, wolf_ids, night_num)
+        embed      = build_wolf_vote_embed(guild, wolf_votes, alive_players, wolf_ids, night_num,
+                                           den_channel=wolf_den_ch)
         wv_msg     = await wolf_den_ch.send(embed=embed, view=view)
         db_set_state(guild_id, wolf_vote_msg_id=wv_msg.id)
 
@@ -9295,7 +9301,6 @@ async def assign_role(interaction: discord.Interaction, player: discord.Member, 
 @assign_role.autocomplete("role")
 async def assign_role_autocomplete(interaction: discord.Interaction, current: str):
     roles = get_game_roles(interaction.guild_id) if game_active(interaction.guild_id) else cached_load_roles(interaction.guild_id)
-    conn.close()
 
     return [
         app_commands.Choice(name=f"{r['name']} ({r['team']})", value=r["name"])
@@ -9416,7 +9421,6 @@ async def turn_player(interaction: discord.Interaction, player: discord.Member, 
 async def turn_player_role_autocomplete(interaction: discord.Interaction, current: str):
     roles = cached_load_roles(interaction.guild_id)
     wolf_roles = [r for r in roles if r["team"] == "wolf"]
-    conn.close()
 
     return [
         app_commands.Choice(name=r["name"], value=r["name"])
@@ -9817,7 +9821,6 @@ async def list_reserves(interaction: discord.Interaction):
 @reserve_role.autocomplete("role")
 async def reserve_role_autocomplete(interaction: discord.Interaction, current: str):
     roles = cached_load_roles(interaction.guild_id)
-    conn.close()
 
     return [
         app_commands.Choice(name=f"{r['name']} ({r['team']})", value=r["name"])
@@ -11790,22 +11793,54 @@ async def assign_victors(interaction: discord.Interaction, winning_team: str):
     if not rows:
         return await interaction.followup.send("No player data found.", ephemeral=True)
 
-    all_pids      = [r[0] for r in rows]
-    winner_pids   = [r[0] for r in rows if get_team(interaction.guild_id, r[1]) == winning_team]
-    dead_pids     = [r[0] for r in rows if r[2] == 0]
+    guild_id = interaction.guild_id
 
-    db_update_stats(interaction.guild_id, all_pids, winner_pids, dead_pids)
+    # ── Build effective team map — accounts for mid-game team changes ──────
+    # 1. Turned players (Alpha/Elite Alpha successful turn) → wolf team
+    conn_t = sqlite3.connect(DB_FILE)
+    c_t    = conn_t.cursor()
+    c_t.execute(
+        "SELECT DISTINCT target_id FROM turn_log WHERE guild_id=? AND result='successful'",
+        (guild_id,))
+    turned_pids = {r[0] for r in c_t.fetchall()}
+    conn_t.close()
 
-    # Record role history for every player
+    # 2. Traitor who switched → wolf team
+    state_end = cached_get_state(guild_id) or {}
+    traitor_switched = bool(state_end.get("traitor_switched", 0))
+    traitor_pid = None
+    if traitor_switched:
+        traitor_row = next((r for r in rows if r[1] == "Traitor"), None)
+        if traitor_row:
+            traitor_pid = traitor_row[0]
+
+    def effective_team(pid, role_name):
+        """Return the team this player actually belongs to at game end."""
+        if pid in turned_pids:
+            return "wolf"
+        if traitor_pid and pid == traitor_pid:
+            return "wolf"
+        return get_team(guild_id, role_name)
+
+    all_pids    = [r[0] for r in rows]
+    winner_pids = [r[0] for r in rows if effective_team(r[0], r[1]) == winning_team]
+    dead_pids   = [r[0] for r in rows if r[2] == 0]
+
+    db_update_stats(guild_id, all_pids, winner_pids, dead_pids)
+
+    # Record role history — use effective team so stats reflect what actually happened
     for pid, role_name, is_alive, _ in rows:
-        team    = get_team(interaction.guild_id, role_name)
+        team    = effective_team(pid, role_name)
         outcome = "win" if pid in winner_pids else "loss"
-        db_record_role_history(interaction.guild_id, pid, role_name, team, outcome)
+        db_record_role_history(guild_id, pid, role_name, team, outcome)
 
     winner_names = []
     for pid in winner_pids:
         m = interaction.guild.get_member(pid)
-        winner_names.append(m.display_name if m else str(pid))
+        name = m.display_name if m else str(pid)
+        if pid in turned_pids:     name += " *(turned)*"
+        elif pid == traitor_pid:   name += " *(switched)*"
+        winner_names.append(name)
 
     await log_event(interaction.guild, "End",
                     f"🏆 **{winning_team.capitalize()}** declared winners. "
@@ -11849,11 +11884,13 @@ async def assign_victors(interaction: discord.Interaction, winning_team: str):
 
     by_team = {"wolf": [], "village": [], "neutral": []}
     for pid, role_name, is_alive, _ in rows:
-        team       = get_team(interaction.guild_id, role_name)
+        team       = effective_team(pid, role_name)
         alive_icon = "✅" if is_alive else "💀"
         winner_icon = "🏆 " if pid in winner_pids else ""
+        turned_note = " *(turned)*" if pid in turned_pids else ""
+        traitor_note = " *(switched)*" if pid == traitor_pid else ""
         by_team.setdefault(team, []).append(
-            f"{alive_icon} {winner_icon}**{_rv_name(pid)}** — {role_name}")
+            f"{alive_icon} {winner_icon}**{_rv_name(pid)}** — {role_name}{turned_note}{traitor_note}")
 
     win_label = {
         "village": "🏘️ Village Wins",
@@ -11923,10 +11960,10 @@ async def assign_victors(interaction: discord.Interaction, winning_team: str):
             f"🔄 **Most Vote Changes:** {pid_to_name.get(top_flipper_id, str(top_flipper_id))} "
             f"— changed their vote {vote_flips[top_flipper_id]}x")
 
-    # — Wolves who survived to the end
+    # — Wolves who survived to the end (including turned wolves)
     surviving_wolves = [
         r for r in all_rows
-        if r[2] == 1 and get_team(interaction.guild_id, r[1]) == "wolf"
+        if r[2] == 1 and effective_team(r[0], r[1]) == "wolf"
     ]
     if surviving_wolves:
         wolf_names = ", ".join(pid_to_name.get(r[0], str(r[0])) for r in surviving_wolves)
@@ -12601,9 +12638,21 @@ def build_tracker_embed(guild, guild_id, owner_id, show_dead=True, sort_by_suspi
     return embed
 
 
+async def _refresh_tracker_embed(guild, guild_id, owner_id, ch_id, msg_id):
+    """Fetch the tracker message and update its embed. Silently ignores failures."""
+    try:
+        ch = guild.get_channel(ch_id) or guild.get_thread(ch_id)
+        if not ch:
+            ch = await guild.fetch_channel(ch_id)
+        msg = await ch.fetch_message(msg_id)
+        await msg.edit(embed=build_tracker_embed(guild, guild_id, owner_id))
+    except Exception as e:
+        print(f"[tracker] embed refresh failed: {e}")
+
+
 class TrackerSuspicionView(View):
     def __init__(self, guild_id, owner_id, target_id, tracker_msg_id, ch_id):
-        super().__init__(timeout=60)
+        super().__init__(timeout=120)
         self.guild_id       = guild_id
         self.owner_id       = owner_id
         self.target_id      = target_id
@@ -12614,59 +12663,83 @@ class TrackerSuspicionView(View):
         self.add_item(sel)
 
     async def on_select(self, interaction: discord.Interaction):
+        # Defer immediately — DB write + fetch_message can exceed 3s
+        await interaction.response.defer(ephemeral=True)
         val = interaction.data["values"][0]
         db_set_tracker_entry(self.guild_id, self.owner_id, self.target_id, suspicion=val)
-        ch = interaction.guild.get_channel(self.ch_id) or interaction.guild.get_thread(self.ch_id)
-        if not ch:
-            try: ch = await interaction.guild.fetch_channel(self.ch_id)
-            except Exception: ch = None
-        if ch:
-            try:
-                msg = await ch.fetch_message(self.tracker_msg_id)
-                await msg.edit(embed=build_tracker_embed(interaction.guild, self.guild_id, self.owner_id))
-            except Exception as e:
-                print(f"[tracker] embed update failed: {e}")
+        await _refresh_tracker_embed(interaction.guild, self.guild_id, self.owner_id,
+                                     self.ch_id, self.tracker_msg_id)
         target = interaction.guild.get_member(self.target_id)
         tname  = target.display_name if target else str(self.target_id)
         emoji  = SUSPICION_EMOJI.get(val, "⚫")
-        await interaction.response.send_message(
+        await interaction.followup.send(
             fmt(f"{emoji} Suspicion for **{tname}** set to {val}/10."), ephemeral=True)
 
 
 class TrackerRoleView(View):
-    def __init__(self, guild_id, owner_id, target_id, tracker_msg_id, ch_id):
-        super().__init__(timeout=60)
+    """
+    Paginated role selector — shows 23 roles per page with Prev/Next buttons.
+    Pulls from the guild's actual game_roles so custom roles are always included.
+    """
+    def __init__(self, guild_id, owner_id, target_id, tracker_msg_id, ch_id, page=0):
+        super().__init__(timeout=120)
         self.guild_id       = guild_id
         self.owner_id       = owner_id
         self.target_id      = target_id
         self.tracker_msg_id = tracker_msg_id
         self.ch_id          = ch_id
+        self.page           = page
 
-        roles = cached_load_roles(guild_id)
-        opts  = [discord.SelectOption(label=r["name"][:100], value=r["name"]) for r in roles[:25]]
-        opts.insert(0, discord.SelectOption(label="— Clear suspected role —", value="__clear__"))
-        sel = Select(placeholder="Set suspected role...", options=opts)
+        # Load real roles for this guild
+        all_roles = cached_load_roles(guild_id)
+        self.role_names = [r["name"] for r in all_roles]
+        self.page_size  = 23  # leave room for clear option + fits Discord's 25 limit
+
+        total_pages = max(1, -(-len(self.role_names) // self.page_size))  # ceiling div
+        start = page * self.page_size
+        end   = start + self.page_size
+        page_roles = self.role_names[start:end]
+
+        opts = [discord.SelectOption(label="— Clear suspected role —", value="__clear__")]
+        opts += [discord.SelectOption(label=r, value=r) for r in page_roles]
+        sel = Select(placeholder=f"Suspected role (page {page+1}/{total_pages})...", options=opts)
         sel.callback = self.on_select
         self.add_item(sel)
 
+        # Prev button
+        if page > 0:
+            prev_btn = Button(label="◀ Prev", style=discord.ButtonStyle.secondary, row=1)
+            prev_btn.callback = self.on_prev
+            self.add_item(prev_btn)
+
+        # Next button
+        if end < len(self.role_names):
+            next_btn = Button(label="Next ▶", style=discord.ButtonStyle.secondary, row=1)
+            next_btn.callback = self.on_next
+            self.add_item(next_btn)
+
     async def on_select(self, interaction: discord.Interaction):
-        val = interaction.data["values"][0]
+        await interaction.response.defer(ephemeral=True)
+        val      = interaction.data["values"][0]
         role_val = "" if val == "__clear__" else val
         db_set_tracker_entry(self.guild_id, self.owner_id, self.target_id, suspected_role=role_val)
-        ch = interaction.guild.get_channel(self.ch_id) or interaction.guild.get_thread(self.ch_id)
-        if not ch:
-            try: ch = await interaction.guild.fetch_channel(self.ch_id)
-            except Exception: ch = None
-        if ch:
-            try:
-                msg = await ch.fetch_message(self.tracker_msg_id)
-                await msg.edit(embed=build_tracker_embed(interaction.guild, self.guild_id, self.owner_id))
-            except Exception as e:
-                print(f"[tracker] embed update failed: {e}")
+        await _refresh_tracker_embed(interaction.guild, self.guild_id, self.owner_id,
+                                     self.ch_id, self.tracker_msg_id)
         target = interaction.guild.get_member(self.target_id)
         tname  = target.display_name if target else str(self.target_id)
-        await interaction.response.send_message(
-            fmt(f"🎭 Suspected role for **{tname}** set to **{role_val or 'cleared'}**."), ephemeral=True)
+        await interaction.followup.send(
+            fmt(f"🎭 Suspected role for **{tname}** set to **{role_val or 'cleared'}**."),
+            ephemeral=True)
+
+    async def on_prev(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            view=TrackerRoleView(self.guild_id, self.owner_id, self.target_id,
+                                 self.tracker_msg_id, self.ch_id, page=self.page - 1))
+
+    async def on_next(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            view=TrackerRoleView(self.guild_id, self.owner_id, self.target_id,
+                                 self.tracker_msg_id, self.ch_id, page=self.page + 1))
 
 
 class TrackerNoteModal(discord.ui.Modal, title="Add a Note"):
@@ -12689,28 +12762,16 @@ class TrackerNoteModal(discord.ui.Modal, title="Add a Note"):
             self.note.placeholder = f"Current: {existing_note[:80]}... (will append)"
 
     async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         new_text = self.note.value.strip()
-        # Append to existing notes with a separator
-        if self.existing_note:
-            combined = f"{self.existing_note} | {new_text}"
-        else:
-            combined = new_text
-        combined = combined[-400:]  # Keep last 400 chars if too long
+        combined = f"{self.existing_note} | {new_text}" if self.existing_note else new_text
+        combined = combined[-400:]
         db_set_tracker_entry(self.guild_id, self.owner_id, self.target_id, notes=combined)
-        ch = interaction.guild.get_channel(self.ch_id) or interaction.guild.get_thread(self.ch_id)
-        if not ch:
-            try: ch = await interaction.guild.fetch_channel(self.ch_id)
-            except Exception: ch = None
-        if ch:
-            try:
-                msg = await ch.fetch_message(self.tracker_msg_id)
-                await msg.edit(embed=build_tracker_embed(interaction.guild, self.guild_id, self.owner_id))
-            except Exception as e:
-                print(f"[tracker] embed update failed: {e}")
+        await _refresh_tracker_embed(interaction.guild, self.guild_id, self.owner_id,
+                                     self.ch_id, self.tracker_msg_id)
         target = interaction.guild.get_member(self.target_id)
         tname  = target.display_name if target else str(self.target_id)
-        await interaction.response.send_message(
-            fmt(f"📝 Note for **{tname}** updated."), ephemeral=True)
+        await interaction.followup.send(fmt(f"📝 Note for **{tname}** updated."), ephemeral=True)
 
 
 class TrackerClearNoteView(View):
@@ -12727,24 +12788,17 @@ class TrackerClearNoteView(View):
         self.add_item(btn)
 
     async def on_confirm(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         db_set_tracker_entry(self.guild_id, self.owner_id, self.target_id, notes="")
-        ch = interaction.guild.get_channel(self.ch_id) or interaction.guild.get_thread(self.ch_id)
-        if not ch:
-            try: ch = await interaction.guild.fetch_channel(self.ch_id)
-            except Exception: ch = None
-        if ch:
-            try:
-                msg = await ch.fetch_message(self.tracker_msg_id)
-                await msg.edit(embed=build_tracker_embed(interaction.guild, self.guild_id, self.owner_id))
-            except Exception as e:
-                print(f"[tracker] embed update failed: {e}")
-        await interaction.response.send_message(fmt("🗑️ Note cleared."), ephemeral=True)
+        await _refresh_tracker_embed(interaction.guild, self.guild_id, self.owner_id,
+                                     self.ch_id, self.tracker_msg_id)
+        await interaction.followup.send(fmt("🗑️ Note cleared."), ephemeral=True)
 
 
 class TrackerPlayerSelectView(View):
     """Dropdown to pick which player to update, then routes to correct sub-view."""
     def __init__(self, guild_id, owner_id, tracker_msg_id, ch_id, mode, guild=None):
-        super().__init__(timeout=60)
+        super().__init__(timeout=120)
         self.guild_id       = guild_id
         self.owner_id       = owner_id
         self.tracker_msg_id = tracker_msg_id
@@ -12780,9 +12834,10 @@ class TrackerPlayerSelectView(View):
                 fmt("Set suspicion level:"), view=view, ephemeral=True)
         elif self.mode == "role":
             view = TrackerRoleView(self.guild_id, self.owner_id, target_id,
-                                   self.tracker_msg_id, self.ch_id)
+                                   self.tracker_msg_id, self.ch_id, page=0)
             await interaction.response.send_message(
-                fmt("Set suspected role:"), view=view, ephemeral=True)
+                fmt("Set suspected role (use ◀ ▶ to browse all roles):"),
+                view=view, ephemeral=True)
         elif self.mode == "note":
             existing = db_get_tracker(self.guild_id, self.owner_id).get(target_id, {}).get("notes", "")
             modal = TrackerNoteModal(self.guild_id, self.owner_id, target_id,
@@ -12921,19 +12976,10 @@ class TrackerMainView(View):
             ephemeral=True)
 
     async def on_refresh(self, interaction: discord.Interaction):
-        ch = interaction.guild.get_channel(self.ch_id) or interaction.guild.get_thread(self.ch_id)
-        if not ch:
-            try: ch = await interaction.guild.fetch_channel(self.ch_id)
-            except Exception: ch = None
-        if ch:
-            try:
-                msg = await ch.fetch_message(self.tracker_msg_id)
-                await msg.edit(
-                    embed=build_tracker_embed(interaction.guild, self.guild_id, self.owner_id),
-                    view=self)
-            except Exception as e:
-                print(f"[tracker] refresh failed: {e}")
-        await interaction.response.send_message(fmt("✅ Tracker refreshed."), ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        await _refresh_tracker_embed(interaction.guild, self.guild_id, self.owner_id,
+                                     self.ch_id, self.tracker_msg_id)
+        await interaction.followup.send(fmt("✅ Tracker refreshed."), ephemeral=True)
 
     async def on_vote_history(self, interaction: discord.Interaction):
         """Show full vote history for all days — who voted for whom, when, and changes."""
@@ -15638,7 +15684,12 @@ async def _deliver_night_results(guild, guild_id: int, night_num: int):
                 color       = 0xC0392B if is_wolf else 0x27AE60
             )
             embed.set_footer(text="Do not share this directly — doing so results in death.")
-            await priv_ch.send(embed=embed)
+            try:
+                await priv_ch.send(embed=embed)
+            except Exception as e:
+                print(f"[deliver] Seer result send failed for {actor_id}: {e}")
+                await post_mod_log(guild,
+                    f"⚠️ Could not deliver Seer result to <#{priv_ch.id}> — {e}")
 
     # ── Step 4: Deliver Medium results ───────────────────────────────────
     APPEARS_GOOD = {"Elite Alpha", "Blessed Wolf", "Werekitten", "Cursed"}
@@ -15667,9 +15718,14 @@ async def _deliver_night_results(guild, guild_id: int, night_num: int):
 
         priv_ch = get_priv_ch(actor_id)
         if priv_ch:
-            await priv_ch.send(fmt(
-                f"🌀 **Medium Result — Night {night_num}**\n"
-                f"**{target_name}** — {alignment}"))
+            try:
+                await priv_ch.send(fmt(
+                    f"🌀 **Medium Result — Night {night_num}**\n"
+                    f"**{target_name}** — {alignment}"))
+            except Exception as e:
+                print(f"[deliver] Medium result send failed for {actor_id}: {e}")
+                await post_mod_log(guild,
+                    f"⚠️ Could not deliver Medium result to <#{priv_ch.id}> — {e}")
 
     # ── Step 5: Deliver Bloodhound results ───────────────────────────────
     state   = db_get_state(guild_id) or {}
@@ -15683,17 +15739,25 @@ async def _deliver_night_results(guild, guild_id: int, night_num: int):
 
         # Deliver to wolf den
         if wolf_ch:
-            den_msg = (f"🦴 **Bloodhound Report** — Night {night_num}\n"
-                       f"Scanned: **{'themselves' if is_self else target_name}**\n"
-                       f"Exact role: **{target_role}**")
-            await wolf_ch.send(den_msg)
+            try:
+                den_msg = (f"🦴 **Bloodhound Report** — Night {night_num}\n"
+                           f"Scanned: **{'themselves' if is_self else target_name}**\n"
+                           f"Exact role: **{target_role}**")
+                await wolf_ch.send(den_msg)
+            except Exception as e:
+                print(f"[deliver] Bloodhound den send failed: {e}")
 
         # Deliver to Bloodhound private channel
         priv_ch = get_priv_ch(actor_id)
         if priv_ch:
             priv_msg = (f"🦴 Self-scan complete. Your role confirmed as: **{target_role}**." if is_self
                         else f"🦴 Scan complete. **{target_name}** is: **{target_role}**.")
-            await priv_ch.send(fmt(priv_msg))
+            try:
+                await priv_ch.send(fmt(priv_msg))
+            except Exception as e:
+                print(f"[deliver] Bloodhound result send failed for {actor_id}: {e}")
+                await post_mod_log(guild,
+                    f"⚠️ Could not deliver Bloodhound result to <#{priv_ch.id}> — {e}")
 
     await post_mod_log(guild,
         f"✅ **Night {night_num} results delivered** — Seer, Medium, and Bloodhound results sent.")
@@ -15739,14 +15803,51 @@ class DeliverResultsView(View):
         # Use stored guild_id/night_num, or fall back to live state after restart
         guild_id  = self.guild_id  or interaction.guild_id
         night_num = self.night_num or db_get_night_num(guild_id)
-        await interaction.response.edit_message(
-            content=f"⏳ Delivering Night {night_num} results...", view=None)
-        await _deliver_night_results(interaction.guild, guild_id, night_num)
-        db_set_state(guild_id, investigations_done=1)
-        invalidate_cache(guild_id)
-        safe_task(update_mod_dashboard(interaction.guild), "dashboard_deliver")
-        await interaction.edit_original_response(
-            content=f"✅ Night {night_num} results delivered to all players.")
+
+        # Defer immediately — delivery loops through multiple channels and can take several seconds
+        await interaction.response.defer(ephemeral=True)
+
+        # Disable the button so it can't be double-clicked
+        try:
+            await interaction.message.edit(
+                content=f"⏳ Delivering Night {night_num} results...", view=None)
+        except Exception:
+            pass  # Non-fatal if message edit fails
+
+        try:
+            await _deliver_night_results(interaction.guild, guild_id, night_num)
+            db_set_state(guild_id, investigations_done=1)
+            invalidate_cache(guild_id)
+            safe_task(update_mod_dashboard(interaction.guild), "dashboard_deliver")
+            # Update the button message to show success
+            try:
+                await interaction.message.edit(
+                    content=f"✅ Night {night_num} results delivered to all players.")
+            except Exception:
+                pass
+            await interaction.followup.send(
+                f"✅ Night {night_num} results delivered.", ephemeral=True)
+        except Exception as e:
+            import traceback
+            tb = traceback.format_exc()
+            print(f"[deliver_results] Error: {e}\n{tb}")
+            # Post the error to mod-log so mods can see what went wrong
+            try:
+                await post_mod_log(interaction.guild,
+                    f"⚠️ **Deliver Results failed — Night {night_num}**\n"
+                    f"Error: `{str(e)[:300]}`\n"
+                    f"Some results may have been partially delivered. "
+                    f"Use `/submit_action` to manually re-deliver if needed.")
+            except Exception:
+                pass
+            try:
+                await interaction.message.edit(
+                    content=f"⚠️ Night {night_num} delivery failed — check mod-log for details.")
+            except Exception:
+                pass
+            await interaction.followup.send(
+                f"❌ Delivery failed: {str(e)[:200]}\nCheck mod-log for details.",
+                ephemeral=True)
 
 SEER_WOLF_LINES = [
     "The veil parts for a moment. The truth is unmistakable.",
@@ -18605,7 +18706,6 @@ async def roleinfo(interaction: discord.Interaction, role: str):
 @roleinfo.autocomplete("role")
 async def roleinfo_autocomplete(interaction: discord.Interaction, current: str):
     roles = get_game_roles(interaction.guild_id) if game_active(interaction.guild_id) else cached_load_roles(interaction.guild_id)
-    conn.close()
 
     return [
         app_commands.Choice(
