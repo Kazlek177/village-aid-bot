@@ -13239,10 +13239,13 @@ class BaseNightView(View):
         """Include self in options (for roles that can target anyone)."""
         return self._player_options(exclude_self=False)
 
-    async def _save_and_close(self, interaction, action_key, target_id, confirm_text):
+    async def _save_and_close(self, interaction, action_key, target_id, confirm_text,
+                               mod_log_msg: str = None):
+        """Save night action, edit message, then post to mod-log. Always responds within 3s."""
         try:
             night_num = db_get_night_num(interaction.guild_id)
             db_save_night_action(interaction.guild_id, night_num, self.actor_id, action_key, target_id)
+            # Respond first — must happen within 3 seconds
             try:
                 await interaction.response.edit_message(content=fmt(f"✅ {confirm_text}"), view=None)
             except discord.errors.InteractionResponded:
@@ -13253,6 +13256,9 @@ class BaseNightView(View):
                     await interaction.response.send_message(content=fmt(f"✅ {confirm_text}"), ephemeral=True)
                 except Exception:
                     pass
+            # Post to mod-log after responding (safe - interaction already acknowledged)
+            if mod_log_msg:
+                await post_mod_log(interaction.guild, mod_log_msg)
             actor  = interaction.guild.get_member(self.actor_id)
             target = interaction.guild.get_member(target_id) if target_id else None
             await _mod_log_action(interaction.guild, night_num, actor, target, self.role_name)
@@ -13353,18 +13359,18 @@ class DoctorView(BaseNightView):
         db_save_night_action(interaction.guild_id, night_num, self.actor_id, "doctor_save", None)
         db_deduct_ability_uses(interaction.guild_id, self.actor_id, 1)
         actor = interaction.guild.get_member(self.actor_id)
-        await post_mod_log(interaction.guild,
-            f"💊 **Doctor** — Night {night_num}\n**{actor.display_name}** used their **SAVE** (0 remaining).")
         await interaction.response.edit_message(
             content=fmt("✅ Save used. This was your only save for the game."), view=None)
+        await post_mod_log(interaction.guild,
+            f"💊 **Doctor** — Night {night_num}\n**{actor.display_name}** used their **SAVE** (0 remaining).")
 
     async def on_skip(self, interaction):
         night_num = db_get_night_num(interaction.guild_id)
         db_save_night_action(interaction.guild_id, night_num, self.actor_id, "doctor_skip", None)
         actor = interaction.guild.get_member(self.actor_id)
+        await interaction.response.edit_message(content=fmt("✅ You chose not to save tonight."), view=None)
         await post_mod_log(interaction.guild,
             f"💊 **Doctor** — Night {night_num}\n**{actor.display_name}** chose to **SKIP** tonight.")
-        await interaction.response.edit_message(content=fmt("✅ You chose not to save tonight."), view=None)
 
 
 # ── Surgeon ───────────────────────────────────────────────────────────────
@@ -13453,9 +13459,9 @@ class SurgeonView(BaseNightView):
         night_num = db_get_night_num(interaction.guild_id)
         db_save_night_action(interaction.guild_id, night_num, self.actor_id, "surgeon_skip", None)
         actor = interaction.guild.get_member(self.actor_id)
+        await interaction.response.edit_message(content=fmt("✅ You chose not to save tonight."), view=None)
         await post_mod_log(interaction.guild,
             f"🏥 **Surgeon** — Night {night_num}\n**{actor.display_name}** chose to **SKIP** tonight.")
-        await interaction.response.edit_message(content=fmt("✅ You chose not to save tonight."), view=None)
 
 
 
@@ -13510,12 +13516,11 @@ class WitchView(BaseNightView):
         db_set_witch_use(interaction.guild_id, self.actor_id, save=1)
         target = interaction.guild.get_member(target_id)
         actor  = interaction.guild.get_member(self.actor_id)
+        await interaction.response.edit_message(
+            content=fmt(f"✅ Save potion used on {target.display_name if target else target_id}."), view=None)
         await post_mod_log(interaction.guild,
             f"🧙 **Witch** — Night {night_num}\n"
             f"**{actor.display_name}** used **SAVE potion** on **{target.display_name if target else target_id}**")
-        db_record_witch_night(interaction.guild_id, db_get_night_num(interaction.guild_id))
-        await interaction.response.edit_message(
-            content=fmt(f"✅ Save potion used on {target.display_name if target else target_id}."), view=None)
 
     async def on_kill(self, interaction):
         _, used_kill = db_get_witch_uses(interaction.guild_id, self.actor_id)
@@ -13530,20 +13535,19 @@ class WitchView(BaseNightView):
         db_set_witch_use(interaction.guild_id, self.actor_id, kill=1)
         target = interaction.guild.get_member(target_id)
         actor  = interaction.guild.get_member(self.actor_id)
+        await interaction.response.edit_message(
+            content=fmt(f"✅ Poison potion used on {target.display_name if target else target_id}."), view=None)
         await post_mod_log(interaction.guild,
             f"🧙 **Witch** — Night {night_num}\n"
             f"**{actor.display_name}** used **POISON potion** on **{target.display_name if target else target_id}**")
-        db_record_witch_night(interaction.guild_id, db_get_night_num(interaction.guild_id))
-        await interaction.response.edit_message(
-            content=fmt(f"✅ Poison potion used on {target.display_name if target else target_id}."), view=None)
 
     async def on_skip(self, interaction):
         night_num = db_get_night_num(interaction.guild_id)
         db_save_night_action(interaction.guild_id, night_num, self.actor_id, "witch_skip", None)
         actor = interaction.guild.get_member(self.actor_id)
+        await interaction.response.edit_message(content=fmt("✅ You chose to skip this night."), view=None)
         await post_mod_log(interaction.guild,
             f"🧙 **Witch** — Night {night_num}\n**{actor.display_name}** chose to **SKIP** tonight.")
-        await interaction.response.edit_message(content=fmt("✅ You chose to skip this night."), view=None)
 
 
 # ── Huntsman ──────────────────────────────────────────────────────────────
@@ -13570,9 +13574,9 @@ class HuntsmanView(BaseNightView):
         night_num = db_get_night_num(interaction.guild_id)
         db_save_night_action(interaction.guild_id, night_num, self.actor_id, "huntsman_skip", None)
         actor = interaction.guild.get_member(self.actor_id)
+        await interaction.response.edit_message(content=fmt("✅ You chose not to protect anyone tonight."), view=None)
         await post_mod_log(interaction.guild,
             f"🏹 **Huntsman** — Night {night_num}\n**{actor.display_name}** chose not to protect anyone.")
-        await interaction.response.edit_message(content=fmt("✅ You chose not to protect anyone tonight."), view=None)
 
 
 # ── Medium ────────────────────────────────────────────────────────────────
@@ -13647,9 +13651,9 @@ class HermitView(BaseNightView):
         night_num = db_get_night_num(interaction.guild_id)
         db_save_night_action(interaction.guild_id, night_num, self.actor_id, "hermit_skip", None)
         actor = interaction.guild.get_member(self.actor_id)
+        await interaction.response.edit_message(content=fmt("✅ You chose not to hide anyone this round."), view=None)
         await post_mod_log(interaction.guild,
             f"🏚️ **Hermit** — Night {night_num}\n**{actor.display_name}** chose not to hide anyone.")
-        await interaction.response.edit_message(content=fmt("✅ You chose not to hide anyone this round."), view=None)
 
 
 # ── Agitator ──────────────────────────────────────────────────────────────
@@ -13678,14 +13682,14 @@ class AgitatorView(BaseNightView):
         db_save_night_action(interaction.guild_id, night_num, self.actor_id, "agitator_frenzy", None)
         db_deduct_ability_uses(interaction.guild_id, self.actor_id, 1)
         actor = interaction.guild.get_member(self.actor_id)
-        await post_mod_log(interaction.guild,
-            f"📢 **Agitator** — Night {night_num}\n"
-            f"**{actor.display_name}** has used their **FRENZY** ability! "
-            f"The village will require TWO lynches tomorrow. Post announcement at morning blood board.")
         await interaction.response.edit_message(
             content=fmt("✅ Frenzy used! The village will be notified tomorrow that two votes are required.\n"
                         "This was your only frenzy for the game."),
             view=None)
+        await post_mod_log(interaction.guild,
+            f"📢 **Agitator** — Night {night_num}\n"
+            f"**{actor.display_name}** has used their **FRENZY** ability! "
+            f"The village will require TWO lynches tomorrow. Post announcement at morning blood board.")
 
     async def on_skip(self, interaction):
         night_num = db_get_night_num(interaction.guild_id)
@@ -13720,13 +13724,13 @@ class GovernorPardonView(View):
         if interaction.user.id != self.governor_id:
             return await interaction.response.send_message(
                 "❌ Only the Governor can use this.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
         target_id = int(interaction.data["values"][0])
         target    = interaction.guild.get_member(target_id)
         tname     = target.display_name if target else str(target_id)
         governor  = interaction.guild.get_member(self.governor_id)
         gname     = governor.display_name if governor else str(self.governor_id)
 
-        # Record pardon in night actions (use current night_num)
         night_num = db_get_night_num(self.guild_id)
         db_save_night_action(self.guild_id, night_num, self.governor_id, "governor_pardon", target_id)
 
@@ -13735,10 +13739,10 @@ class GovernorPardonView(View):
             f"**{gname}** has pardoned **{tname}** from today's vote.\n"
             f"*{tname} cannot be eliminated today.*")
 
-        await interaction.response.edit_message(
-            content=fmt(f"🎖️ **{tname}** has been pardoned from today's vote.\n"
-                        f"Mod has been notified. {tname} cannot be eliminated today."),
-            view=None)
+        await interaction.followup.send(
+            fmt(f"🎖️ **{tname}** has been pardoned from today's vote.\n"
+                f"Mod has been notified. {tname} cannot be eliminated today."),
+            ephemeral=True)
 
     async def on_cancel(self, interaction: discord.Interaction):
         if interaction.user.id != self.governor_id:
@@ -13826,24 +13830,24 @@ class CupidView(BaseNightView):
         n1 = m1.display_name if m1 else str(p1)
         n2 = m2.display_name if m2 else str(p2)
         # Targets are NOT notified — mod-log only (game of deception)
+        await interaction.response.edit_message(
+            content=fmt(f"💘 Bound {n1} and {n2} tonight.\nIf either dies, the other follows.\nBond expires at dawn."),
+            view=None)
         await post_mod_log(interaction.guild,
             f"💘 **Cupid Bond — Night {night_num}**\n"
             f"**Bound:** {n1} ↔ {n2}\n"
             f"Bond expires at morning resolution.")
-        await interaction.response.edit_message(
-            content=fmt(f"💘 Bound {n1} and {n2} tonight.\nIf either dies, the other follows.\nBond expires at dawn."),
-            view=None)
 
     async def on_skip(self, interaction):
         night_num = db_get_night_num(interaction.guild_id)
         db_save_night_action(interaction.guild_id, night_num, self.actor_id, "cupid_skip", None)
         db_clear_cupid_current(interaction.guild_id)
-        await post_mod_log(interaction.guild,
-            f"💘 **Cupid** — Night {night_num}\n"
-            f"Chose not to bind anyone. Previous bond cleared.")
         await interaction.response.edit_message(
             content=fmt("💘 No bind tonight. Any previous bond has been cleared."),
             view=None)
+        await post_mod_log(interaction.guild,
+            f"💘 **Cupid** — Night {night_num}\n"
+            f"Chose not to bind anyone. Previous bond cleared.")
 
 # ── Wolf Pup ──────────────────────────────────────────────────────────────
 class WolfPupView(BaseNightView):
@@ -13862,12 +13866,12 @@ class WolfPupView(BaseNightView):
         db_record_block(interaction.guild_id, night_num, self.actor_id, target_id)
         target = interaction.guild.get_member(target_id)
         actor  = interaction.guild.get_member(self.actor_id)
+        await interaction.response.edit_message(
+            content=fmt(f"✅ Blocking {target.display_name if target else target_id} tonight."), view=None)
         await post_mod_log(interaction.guild,
             f"🐾 **Wolf Pup Block** — Night {night_num}\n"
             f"**{actor.display_name}** is blocking **{target.display_name if target else target_id}** "
             f"— their ability is suppressed this night.")
-        await interaction.response.edit_message(
-            content=fmt(f"✅ Blocking {target.display_name if target else target_id} tonight."), view=None)
 
 
 # ── Alpha ─────────────────────────────────────────────────────────────────
@@ -13909,6 +13913,8 @@ class TurnResultView(View):
         self.add_item(fail_btn)
 
     async def on_success(self, interaction: discord.Interaction):
+        # Defer immediately — this does channel rename, sleep, DB writes, den access, mod-log
+        await interaction.response.defer(ephemeral=True)
         db_record_turn(self.guild_id, self.night_num, self.actor_id, self.target_id, "success")
         guild  = interaction.guild
         state  = db_get_state(self.guild_id) or {}
@@ -14027,6 +14033,7 @@ class TurnResultView(View):
         safe_task(update_mod_dashboard(interaction.guild), "dashboard_turn_success")
 
     async def on_fail(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         db_record_turn(self.guild_id, self.night_num, self.actor_id, self.target_id, "failed")
         await _safe_edit(interaction,
             content=f"❌ Turn attempt on **{self.target_name}** failed — no change.")
@@ -14242,11 +14249,11 @@ class CrazedWolfView(BaseNightView):
         actor  = interaction.guild.get_member(self.actor_id)
         tname1 = getattr(interaction.guild.get_member(t1), "display_name", str(t1))
         tname2 = getattr(interaction.guild.get_member(t2), "display_name", str(t2))
+        await interaction.response.edit_message(
+            content=fmt(f"✅ Double kill submitted: {tname1} and {tname2}."), view=None)
         await post_mod_log(interaction.guild,
             f"🌪️ **Crazed Wolf Double Kill** — Night {night_num}\n"
             f"**{actor.display_name}** targeting: **{tname1}** then **{tname2}**")
-        await interaction.response.edit_message(
-            content=fmt(f"✅ Double kill submitted: {tname1} and {tname2}."), view=None)
 
 
 # ── Dire Wolf ─────────────────────────────────────────────────────────────
@@ -14539,17 +14546,16 @@ class WerekittenKillView(BaseNightView):
 
         db_save_night_action(interaction.guild_id, night_num, self.actor_id, "werekitten_kill", target_id)
 
-        await post_mod_log(interaction.guild,
-            f"🐱 **Werekitten Kill** — Night {night_num}\n"
-            f"**{actor.display_name if actor else self.actor_id}** targeting **{tname}**\n"
-            f"*Bypasses Sheriff and Huntsman. Doctor/Surgeon saves still apply. Den kill is REPLACED.*")
-
         await interaction.response.edit_message(
             content=fmt(
                 f"🐱 Kill target submitted: **{tname}**\n"
                 f"The den kill is replaced tonight — they will not know your target.\n"
                 f"*Remember: Doctor and Surgeon saves still apply to your target.*"),
             view=None)
+        await post_mod_log(interaction.guild,
+            f"🐱 **Werekitten Kill** — Night {night_num}\n"
+            f"**{actor.display_name if actor else self.actor_id}** targeting **{tname}**\n"
+            f"*Bypasses Sheriff and Huntsman. Doctor/Surgeon saves still apply. Den kill is REPLACED.*")
 
     async def on_skip(self, interaction: discord.Interaction):
         night_num = db_get_night_num(interaction.guild_id)
@@ -14610,6 +14616,11 @@ class WhiteWolfView(BaseNightView):
 
         db_save_night_action(interaction.guild_id, night_num, self.actor_id, "white_wolf_kill", target_id)
 
+        await interaction.response.edit_message(
+            content=fmt(
+                f"🤍 Kill submitted: **{tname}**\n"
+                f"*The mod will confirm the result. If your target is not a wolf, you gain a strike.*"),
+            view=None)
         await post_mod_log(interaction.guild,
             f"🤍 **White Wolf Kill** — Night {night_num}\n"
             f"**{actor.display_name if actor else self.actor_id}** targeting **{tname}**\n"
@@ -14617,28 +14628,21 @@ class WhiteWolfView(BaseNightView):
             f"*Use `/ww_result wolf` if target is a wolf (clears obligation). "
             f"Use `/ww_result miss` if not (adds a strike).*")
 
-        await interaction.response.edit_message(
-            content=fmt(
-                f"🤍 Kill submitted: **{tname}**\n"
-                f"*The mod will confirm the result. If your target is not a wolf, you gain a strike.*"),
-            view=None)
-
     async def on_skip(self, interaction: discord.Interaction):
         night_num = db_get_night_num(interaction.guild_id)
         db_save_night_action(interaction.guild_id, night_num, self.actor_id, "white_wolf_skip", None)
         strikes   = db_get_ww_strikes(interaction.guild_id, self.actor_id)
         actor     = interaction.guild.get_member(self.actor_id)
 
-        await post_mod_log(interaction.guild,
-            f"🤍 **White Wolf Skip** — Night {night_num}\n"
-            f"**{actor.display_name if actor else self.actor_id}** is skipping tonight.\n"
-            f"*Run `/ww_result miss` to apply the strike ({strikes + 1}/3 after this).*")
-
         await interaction.response.edit_message(
             content=fmt(
                 f"⏭️ Skipped. The mod will apply a strike.\n"
                 f"*Kill a wolf before you reach 3 strikes or you die.*"),
             view=None)
+        await post_mod_log(interaction.guild,
+            f"🤍 **White Wolf Skip** — Night {night_num}\n"
+            f"**{actor.display_name if actor else self.actor_id}** is skipping tonight.\n"
+            f"*Run `/ww_result miss` to apply the strike ({strikes + 1}/3 after this).*")
 
 
 # ── Oracle ────────────────────────────────────────────────────────────────
@@ -14784,16 +14788,15 @@ class DayGovernorView(View):
         tname     = target.display_name if target else str(target_id)
 
         db_save_night_action(guild_id, night_num, self.governor_id, "governor_pardon", target_id)
-        await post_mod_log(interaction.guild,
-            f"🎖️ **Governor Pardon — Day {night_num}**\n"
-            f"**{interaction.user.display_name}** has pardoned **{tname}** from today's vote.\n"
-            f"*{tname} cannot be eliminated today — apply if they receive the most votes.*")
-
         await interaction.response.edit_message(
             content=fmt(
                 f"🎖️ **Pardon submitted for {tname}.**\n"
                 f"The mod has been notified. If {tname} receives the most votes today, they are safe."),
             view=None)
+        await post_mod_log(interaction.guild,
+            f"🎖️ **Governor Pardon — Day {night_num}**\n"
+            f"**{interaction.user.display_name}** has pardoned **{tname}** from today's vote.\n"
+            f"*{tname} cannot be eliminated today — apply if they receive the most votes.*")
 
 
 # ── Hermit Day Ability View ───────────────────────────────────────────────
@@ -14859,18 +14862,19 @@ class DayHermitView(View):
         tname     = target.display_name if target else str(target_id)
 
         db_save_night_action(guild_id, night_num, self.hermit_id, "hermit", target_id)
+        await interaction.response.defer(ephemeral=True)
         await post_mod_log(interaction.guild,
             f"🏚️ **Hermit Ability — Day {night_num}**\n"
             f"**{interaction.user.display_name}** is hiding **{tname}**.\n"
             f"The second-highest voted player will be eliminated instead.\n"
             f"⚠️ *If {tname} is a wolf, the Hermit dies too.*")
 
-        await interaction.response.edit_message(
-            content=fmt(
+        await interaction.followup.send(
+            fmt(
                 f"🏚️ **{tname}** will be hidden from the vote.\n"
                 f"The mod has been notified.\n"
                 f"⚠️ If {tname} is a wolf, you will die alongside them."),
-            view=None)
+            ephemeral=True)
 
     async def on_skip(self, interaction: discord.Interaction):
         if interaction.user.id != self.hermit_id:
@@ -15002,14 +15006,14 @@ class PothreadSecondKillView(View):
         tname     = target.display_name if target else str(target_id)
         db_save_night_action(interaction.guild_id, self.night_num,
                              interaction.user.id, "pothead_second_kill", target_id)
+        await interaction.response.edit_message(
+            content=fmt(f"🍕 Second kill target selected: {tname}.\nMod has been notified."),
+            view=None)
         await post_mod_log(interaction.guild,
             f"🍕 **Pothead Second Kill** — Night {self.night_num}\n"
             f"**Selected by:** {interaction.user.display_name}\n"
             f"**Target:** {tname}\n"
             f"Mod: eliminate this player at resolution.")
-        await interaction.response.edit_message(
-            content=fmt(f"🍕 Second kill target selected: {tname}.\nMod has been notified."),
-            view=None)
 
 # ── Village Jokester Kill View ─────────────────────────────────────────────
 class JokesterKillView(View):
@@ -15084,12 +15088,12 @@ class NightStatusView(View):
         actor = interaction.guild.get_member(self.actor_id or interaction.user.id)
         role  = self.role_name or "Unknown"
         night = self.night_num or db_get_night_num(interaction.guild_id)
-        await post_mod_log(interaction.guild,
-            f"✅ **{role}** — Night {night}\n"
-            f"**{actor.display_name if actor else interaction.user.display_name}** confirmed: using their ability tonight.")
         await interaction.response.edit_message(
             content=fmt("✅ Got it — the mod knows you are using your ability tonight.\nSubmit it using the action above."),
             view=None)
+        await post_mod_log(interaction.guild,
+            f"✅ **{role}** — Night {night}\n"
+            f"**{actor.display_name if actor else interaction.user.display_name}** confirmed: using their ability tonight.")
 
     async def on_pass(self, interaction: discord.Interaction):
         if self.actor_id and interaction.user.id != self.actor_id:
@@ -15100,12 +15104,12 @@ class NightStatusView(View):
         role      = self.role_name or "Unknown"
         db_save_night_action(guild_id, night_num, actor_id, "_pass", None)
         actor = interaction.guild.get_member(actor_id)
-        await post_mod_log(interaction.guild,
-            f"💤 **{role}** — Night {night_num}\n"
-            f"**{actor.display_name if actor else interaction.user.display_name}** is passing — no action tonight.")
         await interaction.response.edit_message(
             content=fmt("💤 Passed. The mod has been notified. Sleep tight!"),
             view=None)
+        await post_mod_log(interaction.guild,
+            f"💤 **{role}** — Night {night_num}\n"
+            f"**{actor.display_name if actor else interaction.user.display_name}** is passing — no action tonight.")
 
 def get_night_view(guild_id, actor_id, role_name, alive_players):
     """Return the appropriate night action View for a given role, or None if passive."""
@@ -16131,6 +16135,7 @@ async def log_turn_result(interaction: discord.Interaction, player: discord.Memb
     if result not in valid:
         return await interaction.response.send_message(
             f"\N{CROSS MARK} Result must be one of: {', '.join(valid)}", ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
     night_num = db_get_night_num(interaction.guild_id)
     conn = sqlite3.connect(DB_FILE)
     c    = conn.cursor()
@@ -16160,7 +16165,7 @@ async def log_turn_result(interaction: discord.Interaction, player: discord.Memb
                 f"Investigations this night (Seer / Medium / Bloodhound) will now see them correctly as a wolf.\n"
                 f"**If you have not yet delivered investigations, do so now — the DB is updated.**")
 
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"\N{WHITE HEAVY CHECK MARK} Turn result recorded: **{result_pretty}** for **{player.display_name}**.",
         ephemeral=True)
     safe_task(update_mod_dashboard(interaction.guild), "dashboard_turn_result")
@@ -16182,6 +16187,7 @@ async def ww_result(interaction: discord.Interaction, player: discord.Member, re
         return await interaction.response.send_message(
             "❌ Result must be `wolf` (killed a wolf) or `miss` (villager kill or skip).",
             ephemeral=True)
+    await interaction.response.defer(ephemeral=True)
 
     guild_id  = interaction.guild_id
     night_num = db_get_night_num(guild_id)
@@ -16224,7 +16230,7 @@ async def ww_result(interaction: discord.Interaction, player: discord.Member, re
                         "🤍 ⚠️ **Strike 3.**\n"
                         "You have failed to kill a wolf within 3 attempts.\n"
                         "The mod will eliminate you this night."))
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"⚠️ **Strike 3** for **{player.display_name}** — eliminate them this night.",
                 ephemeral=True)
         else:
@@ -16240,7 +16246,7 @@ async def ww_result(interaction: discord.Interaction, player: discord.Member, re
                         f"🤍 **Strike {new_total}/3.**\n"
                         f"Your kill was not a wolf — or you skipped.\n"
                         f"*{remaining} attempt(s) left. Kill a wolf before strike 3 or you die.*"))
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Strike {new_total}/3 recorded for **{player.display_name}** — {remaining} left.",
                 ephemeral=True)
 
