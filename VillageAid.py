@@ -2182,23 +2182,28 @@ def build_day_vote_embed(guild, votes, rows, end_time=None, anonymous=False):
     try:
         conn_sv = sqlite3.connect(DB_FILE)
         c_sv    = conn_sv.cursor()
-        # Detect which guild we're in via the votes/rows
-        # Use guild.id directly
         c_sv.execute(
             "SELECT target_id, COUNT(*) c FROM day_votes_2 WHERE guild_id=? GROUP BY target_id ORDER BY c DESC",
             (guild.id,))
         sv_rows = c_sv.fetchall()
+        c_sv.execute("SELECT COUNT(DISTINCT voter_id) FROM day_votes_2 WHERE guild_id=?", (guild.id,))
+        sv_count = c_sv.fetchone()[0]
         conn_sv.close()
         if sv_rows:
             sv_lines = []
             for tid, cnt in sv_rows:
                 tname = pid_to_name.get(tid, str(tid))
                 sv_lines.append(f"**{tname}** — {cnt}")
-            embed.add_field(name="⚡ Frenzy 2nd Votes", value="\n".join(sv_lines), inline=False)
+            embed.add_field(name="⚡ Frenzy Vote 2", value="\n".join(sv_lines), inline=False)
+            footer = (f"Vote 1: {len(votes)}/{alive_count} · "
+                      f"Vote 2: {sv_count}/{alive_count} · ⚡ Frenzy")
+        else:
+            footer = f"{len(votes)}/{alive_count} alive players have responded"
     except Exception:
-        pass
+        sv_count = 0
+        footer   = f"{len(votes)}/{alive_count} alive players have responded"
 
-    embed.set_footer(text=f"{len(votes)}/{alive_count} alive players have responded")
+    embed.set_footer(text=footer)
     return embed
 
 def build_wolf_vote_embed(guild, wolf_votes, alive_players, wolf_player_ids, night_num,
@@ -3157,6 +3162,13 @@ async def post_day_transition(guild, night_num: int, duration_secs: int, deaths:
                 )
                 view_prompt = DayVoteClosedPromptView(guild.id)
                 await mod_ch_prompt.send(embed=embed_prompt, view=view_prompt)
+
+            # ── Post full results to village-chat so ALL players (inc. dead) can see ──
+            vc_ch_final = guild.get_channel(mod_state.get("village_chat_ch_id") or 0)
+            if vc_ch_final:
+                final_embed = build_final_vote_embed(guild, guild.id, night_num)
+                results_view = VoteResultsView(guild.id, night_num)
+                await vc_ch_final.send(embed=final_embed, view=results_view)
 
     safe_task(_auto_close_vote(), "auto_close_vote")
 
@@ -6033,6 +6045,205 @@ def _build_vote_summary(guild, guild_id) -> str:
 
     return "\n".join(lines)
 
+
+def build_final_vote_embed(guild, guild_id: int, day_num: int) -> discord.Embed:
+    """
+    Build a full who-voted-for-who breakdown for a specific day.
+    Reads from vote_history so historical days are always accessible.
+    Uses only the FINAL vote per voter per vote slot (last entry in chronological order).
+    """
+    # Get vote_history for this day
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute(
+        "SELECT voter_id, target_id, action, voted_at FROM vote_history "
+        "WHERE guild_id=? AND day_num=? ORDER BY entry_id ASC",
+        (guild_id, day_num))
+    history_rows = c.fetchall()
+    conn.close()
+
+    rows  = db_get_assignments(guild_id)
+    npcs  = db_get_npcs(guild_id)
+    npc_map = {n["npc_id"]: n["name"] for n in npcs}
+
+    def get_name(pid):
+        if pid is None: return "Abstain"
+        npc = npc_map.get(pid)
+        if npc: return npc
+        m = guild.get_member(pid)
+        return m.display_name if m else str(pid)
+
+    if not history_rows:
+        embed = discord.Embed(
+            title       = f"📋 Day {day_num} — Vote Results",
+            description = "*No vote history recorded for this day.*",
+            color       = 0x95A5A6
+        )
+        return embed
+
+    # Build final vote state per voter (last entry wins per vote slot)
+    # vote1 slot: actions "vote" or "change"
+    # vote2 slot: actions "vote2" or "change2"
+    final_vote1  = {}  # voter_id -> target_id
+    final_vote2  = {}  # voter_id -> target_id
+    all_voters   = set()
+    changed_pids = set()  # voters who changed at least once
+
+    for voter_id, target_id, action, voted_at in history_rows:
+        all_voters.add(voter_id)
+        if action in ("vote", "change", "abstain"):
+            if action == "change":
+                changed_pids.add(voter_id)
+            final_vote1[voter_id] = target_id
+        elif action in ("vote2", "change2"):
+            if action == "change2":
+                changed_pids.add(voter_id)
+            final_vote2[voter_id] = target_id
+
+    is_frenzy = bool(final_vote2)
+
+    # Tally vote1
+    tally1   = {}
+    abstains = []
+    for voter_id, target_id in final_vote1.items():
+        if target_id is None:
+            abstains.append(get_name(voter_id))
+        else:
+            tally1.setdefault(target_id, []).append(get_name(voter_id))
+
+    # Tally vote2
+    tally2 = {}
+    for voter_id, target_id in final_vote2.items():
+        tally2.setdefault(target_id, []).append(get_name(voter_id))
+
+    # Who never voted
+    alive_pids = {r[0] for r in rows}  # includes dead players who were alive that day
+    # Use all_voters as base — never_voted = alive players not in all_voters
+    # We don't know who was alive day_num exactly so show anyone who appears in assignments but not history
+    never_voted = [get_name(pid) for pid in alive_pids if pid not in all_voters and pid not in npc_map]
+
+    color = 0xE74C3C if is_frenzy else 0x95A5A6
+    embed = discord.Embed(
+        title       = f"{'⚡ Frenzy ' if is_frenzy else ''}📋 Day {day_num} — Final Vote Results",
+        description = "*Final votes only. Changes are noted where applicable.*",
+        color       = color
+    )
+
+    # Vote 1 results
+    v1_label = "🗳️ Vote 1 Results" if is_frenzy else "🗳️ Final Results"
+    if tally1:
+        sorted1   = sorted(tally1.items(), key=lambda x: len(x[1]), reverse=True)
+        top_count = len(sorted1[0][1])
+        for target_id, voters in sorted1:
+            count     = len(voters)
+            leading   = "🔴 " if count == top_count else ""
+            target_nm = get_name(target_id)
+            changed_note = " *(incl. changes)*" if any(
+                v in changed_pids for v in final_vote1 if final_vote1[v] == target_id
+            ) else ""
+            embed.add_field(
+                name  = f"{leading}{target_nm} — {count} vote(s){changed_note}",
+                value = "• " + "\n• ".join(voters),
+                inline= False
+            )
+    else:
+        embed.add_field(name=v1_label, value="*No votes cast.*", inline=False)
+
+    if abstains:
+        embed.add_field(name="🤐 Abstained", value=", ".join(sorted(abstains)), inline=False)
+
+    if never_voted:
+        embed.add_field(name="⚠️ Did Not Vote", value=", ".join(sorted(never_voted)), inline=False)
+
+    # Vote 2 results (frenzy)
+    if tally2:
+        embed.add_field(name="\u200b", value="**⚡ Vote 2 Results (Frenzy)**", inline=False)
+        sorted2 = sorted(tally2.items(), key=lambda x: len(x[1]), reverse=True)
+        top2    = len(sorted2[0][1])
+        for target_id, voters in sorted2:
+            count     = len(voters)
+            leading   = "🔴 " if count == top2 else ""
+            target_nm = get_name(target_id)
+            embed.add_field(
+                name  = f"{leading}{target_nm} — {count} vote(s)",
+                value = "• " + "\n• ".join(voters),
+                inline= False
+            )
+
+    total_voted = len(final_vote1)
+    alive_count = sum(1 for r in rows if r[2] == 1)
+    embed.set_footer(text=(
+        f"{total_voted} player(s) voted · Day {day_num}"
+        + (" · ⚡ Frenzy" if is_frenzy else "")
+        + (f" · {len(changed_pids)} vote change(s)" if changed_pids else "")
+    ))
+    return embed
+
+
+class VoteResultsView(View):
+    """
+    Persistent button posted to village-chat after vote closes.
+    Visible to dead players too. Supports browsing any past day.
+    """
+    def __init__(self, guild_id: int, night_num: int):
+        super().__init__(timeout=None)
+        self.guild_id  = guild_id
+        self.night_num = night_num
+
+        view_btn = Button(label="📊 View Day's Vote Results", style=discord.ButtonStyle.secondary)
+        view_btn.callback = self.on_view
+        self.add_item(view_btn)
+
+        hist_btn = Button(label="📜 Browse All Days", style=discord.ButtonStyle.grey)
+        hist_btn.callback = self.on_browse
+        self.add_item(hist_btn)
+
+    async def on_view(self, interaction: discord.Interaction):
+        guild_id  = self.guild_id  or interaction.guild_id
+        night_num = self.night_num or db_get_night_num(guild_id)
+        embed = build_final_vote_embed(interaction.guild, guild_id, night_num)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def on_browse(self, interaction: discord.Interaction):
+        guild_id = self.guild_id or interaction.guild_id
+        # Get all days that have vote history
+        conn = sqlite3.connect(DB_FILE)
+        c    = conn.cursor()
+        c.execute(
+            "SELECT DISTINCT day_num FROM vote_history WHERE guild_id=? ORDER BY day_num",
+            (guild_id,))
+        days = [r[0] for r in c.fetchall()]
+        conn.close()
+
+        if not days:
+            return await interaction.response.send_message(
+                "No vote history recorded yet.", ephemeral=True)
+
+        # Build a select menu of available days
+        options = [
+            discord.SelectOption(label=f"Day {d}", value=str(d))
+            for d in days[:25]
+        ]
+        view = VoteDaySelectView(guild_id, options)
+        await interaction.response.send_message(
+            "Select a day to view its full vote results:",
+            view=view, ephemeral=True)
+
+
+class VoteDaySelectView(View):
+    def __init__(self, guild_id: int, options: list):
+        super().__init__(timeout=120)
+        self.guild_id = guild_id
+        sel = Select(placeholder="Choose a day...", options=options)
+        sel.callback = self.on_select
+        self.add_item(sel)
+
+    async def on_select(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        day_num = int(interaction.data["values"][0])
+        embed   = build_final_vote_embed(interaction.guild, self.guild_id, day_num)
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
 # ====================== PHASE PROMPT VIEWS ======================
 
 class StartNightPromptView(View):
@@ -6555,6 +6766,7 @@ async def on_ready():
         # Register stateless persistent views — use interaction.guild_id when triggered
         client.add_view(DeliverResultsView())  # bare registration, guild_id resolved at interaction time
         client.add_view(NightStatusView())     # bare registration, actor resolved at interaction time
+        client.add_view(VoteResultsView(0, 0)) # bare registration, guild_id/night_num resolved at interaction time
 
         print(f"Persistent views registered for {registered} active guild(s)")
 
@@ -10060,10 +10272,12 @@ class DayVoteView(View):
                 value    = str(pid),
                 description = "🤖 NPC" if pid in npc_map else None
             ))
-        # Check how many votes this player is allowed
-        state_vote   = db_get_state(interaction.guild_id) or {}
-        max_votes    = int(state_vote.get("votes_per_player") or 1)
+        # Check if frenzy is active this day
+        state_vote   = cached_get_state(interaction.guild_id) or {}
         night_now    = db_get_night_num(interaction.guild_id)
+        frenzy_day   = state_vote.get("agitator_frenzy_day")
+        is_frenzy    = frenzy_day and int(frenzy_day) == int(night_now)
+        max_votes    = 2 if is_frenzy else 1
         votes_1      = db_get_day_votes(interaction.guild_id)
         votes_2      = db_get_day_votes_2(interaction.guild_id)
         has_voted_1  = any(v[0] == interaction.user.id for v in votes_1)
@@ -10112,9 +10326,16 @@ class DayVoteView(View):
         await interaction.response.send_message("✅ You are abstaining this vote.", ephemeral=True)
 
     async def remove_vote(self, interaction: discord.Interaction):
+        state      = cached_get_state(interaction.guild_id) or {}
+        night_num  = db_get_night_num(interaction.guild_id)
+        frenzy_day = state.get("agitator_frenzy_day")
+        is_frenzy  = frenzy_day and int(frenzy_day) == int(night_num)
         db_remove_day_vote(interaction.guild_id, interaction.user.id)
+        if is_frenzy:
+            db_remove_day_vote_2(interaction.guild_id, interaction.user.id)
         await refresh_day_vote(interaction.guild)
-        await interaction.response.send_message("✅ Your vote has been removed.", ephemeral=True)
+        msg = "✅ Both frenzy votes removed." if is_frenzy else "✅ Your vote has been removed."
+        await interaction.response.send_message(msg, ephemeral=True)
 
     async def full_breakdown(self, interaction: discord.Interaction):
         votes = db_get_day_votes(interaction.guild_id)
@@ -10169,28 +10390,48 @@ class DayVoteView(View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     async def not_voted(self, interaction: discord.Interaction):
-        """Show alive players who have not yet cast a vote."""
-        votes   = db_get_day_votes(interaction.guild_id)
-        rows    = db_get_assignments(interaction.guild_id)
-        npcs_nv = db_get_npcs(interaction.guild_id)
+        """Show alive players who have not yet cast a vote (or second vote in frenzy)."""
+        state      = cached_get_state(interaction.guild_id) or {}
+        night_num  = db_get_night_num(interaction.guild_id)
+        frenzy_day = state.get("agitator_frenzy_day")
+        is_frenzy  = frenzy_day and int(frenzy_day) == int(night_num)
+
+        votes_1    = db_get_day_votes(interaction.guild_id)
+        votes_2    = db_get_day_votes_2(interaction.guild_id) if is_frenzy else []
+        rows       = db_get_assignments(interaction.guild_id)
+        npcs_nv    = db_get_npcs(interaction.guild_id)
         npc_map_nv = {n["npc_id"]: n["name"] for n in npcs_nv}
-        voted_ids = {v[0] for v in votes}
-        alive     = [(r[0], r[1]) for r in rows if r[2] == 1]
-        missing   = []
-        for pid, role in alive:
-            if pid not in voted_ids:
-                m    = interaction.guild.get_member(pid)
-                name = npc_map_nv.get(pid) or (m.display_name if m else str(pid))
-                missing.append(name)
-        if not missing:
+
+        voted_ids_1 = {v[0] for v in votes_1}
+        voted_ids_2 = {v[0] for v in votes_2}
+        alive = [(r[0], r[1]) for r in rows if r[2] == 1]
+
+        def get_name(pid):
+            m = interaction.guild.get_member(pid)
+            return npc_map_nv.get(pid) or (m.display_name if m else str(pid))
+
+        not_voted_at_all = [get_name(pid) for pid, _ in alive if pid not in voted_ids_1]
+        need_vote2       = [get_name(pid) for pid, _ in alive
+                            if pid in voted_ids_1 and pid not in voted_ids_2] if is_frenzy else []
+
+        if not not_voted_at_all and not need_vote2:
             return await interaction.response.send_message(
-                "✅ All alive players have voted.", ephemeral=True)
-        embed = discord.Embed(
-            title       = f"⚠️ Has Not Voted ({len(missing)})",
-            description = "\n".join(f"• {n}" for n in sorted(missing)),
-            color       = 0xE74C3C
-        )
-        embed.set_footer(text="These players have not cast or abstained yet")
+                "✅ All alive players have " + ("cast both votes." if is_frenzy else "voted."),
+                ephemeral=True)
+
+        embed = discord.Embed(title="⚠️ Voting Status", color=0xE74C3C)
+        if not_voted_at_all:
+            embed.add_field(
+                name  = f"❌ Has Not Voted ({len(not_voted_at_all)})",
+                value = "\n".join(f"• {n}" for n in sorted(not_voted_at_all)),
+                inline= False)
+        if need_vote2:
+            embed.add_field(
+                name  = f"⚡ Cast Vote 1 — Still Needs Vote 2 ({len(need_vote2)})",
+                value = "\n".join(f"• {n}" for n in sorted(need_vote2)),
+                inline= False)
+        embed.set_footer(text="Frenzy — all players must cast TWO votes" if is_frenzy else
+                              "These players have not voted or abstained yet")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     async def clear_votes(self, interaction: discord.Interaction):
