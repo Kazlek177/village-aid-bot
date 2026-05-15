@@ -612,6 +612,10 @@ def init_db():
     except Exception:
         pass
     try:
+        c.execute("ALTER TABLE game_state ADD COLUMN spec_qa_ch_id INTEGER")
+    except Exception:
+        pass
+    try:
         c.execute("ALTER TABLE game_state ADD COLUMN mod_dashboard_msg_id INTEGER DEFAULT NULL")
     except Exception:
         pass
@@ -8032,6 +8036,24 @@ class ConfirmStartView(View):
         if spec_role: stats_ow[spec_role] = read_ow
         stats_ch = await category.create_text_channel(ch_name("stats",        font, "📊"), overwrites=stats_ow)
 
+        # spectator-qa — spectators ask questions, mods answer; players cannot see
+        spec_qa_ow = {
+            everyone: discord.PermissionOverwrite(view_channel=False),
+            bot_me:   bot_ow,
+        }
+        if mod_role:  spec_qa_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
+        if spec_role: spec_qa_ow[spec_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
+        spec_qa_ch = await category.create_text_channel(ch_name("spectator-qa", font, "👁️"), overwrites=spec_qa_ow)
+        # Pin a welcome message so spectators know how to use it
+        spec_pin = await spec_qa_ch.send(
+            "👁️ **Spectator Q&A**\n\n"
+            "This channel is for spectators only — players cannot see it.\n"
+            "Ask the mod team anything about the game here.\n"
+            "Mods will answer when they can — no spoilers on active night actions.\n\n"
+            "*Enjoy the game!*"
+        )
+        await spec_pin.pin()
+
         # blood-board — all players can read, only bot/mod can post
         bb_ow = {
             everyone: discord.PermissionOverwrite(view_channel=True, send_messages=False),
@@ -8137,21 +8159,58 @@ class ConfirmStartView(View):
                 title       = "📋 Your Private Channel",
                 description = (
                     f"This channel is **only visible to you and the mods**.\n\n"
-                    f"Use it to:\n"
-                    f"• Submit night actions using the buttons sent each night\n"
-                    f"• Communicate privately with the mod team\n"
-                    f"• Track your investigation notes\n\n"
-                    f"**Key commands:**\n"
-                    f"`/my_role` — view your role card again\n"
-                    f"`/action [message]` — send a private message to the mods\n"
-                    f"`/pass_night` — pass your night action if you have no ability\n"
-                    f"`/tracker` — open your personal investigation spreadsheet\n"
-                    f"`/roleinfo {role_name}` — full details on your role\n\n"
-                    f"**Your night order position:** {night_order_pos}\n\n"
-                    f"*Good luck. Whisperfall is watching.*"
+                    f"Use it to submit night actions, talk privately with mods, and track your notes.\n\n"
+                    f"**Your night order position:** {night_order_pos}"
                 ),
                 color = 0x2C3060
             )
+            orient_embed.add_field(
+                name  = "🎭 Your Role",
+                value = (
+                    f"`/my_role` — view your role card again\n"
+                    f"`/roleinfo {role_name}` — full ability details\n"
+                    f"`/rules` — how the game works\n"
+                    f"`/my_actions` — see your submitted night actions this game"
+                ),
+                inline=False
+            )
+            orient_embed.add_field(
+                name  = "🌙 Night Actions",
+                value = (
+                    f"`/pass_night` — pass if your ability button stops working\n"
+                    f"`/action [message]` — send a private message to the mods\n"
+                    f"`/time_left` — check how long remains in the current phase"
+                ),
+                inline=False
+            )
+            orient_embed.add_field(
+                name  = "🗳️ Voting",
+                value = (
+                    f"`/vote_history` — see all votes cast, any day, including dead players\n"
+                    f"`/game_status` — current alive/dead count and phase"
+                ),
+                inline=False
+            )
+            orient_embed.add_field(
+                name  = "🔍 Investigation",
+                value = (
+                    f"`/tracker` — open your personal investigation notes\n"
+                    f"`/claim [player]` — open a private claim channel with another player\n"
+                    f"`/list_players` — see who is still alive"
+                ),
+                inline=False
+            )
+            orient_embed.add_field(
+                name  = "📊 Stats & History",
+                value = (
+                    f"`/my_stats` — your all-time win/loss record\n"
+                    f"`/my_roles` — every role you've played across all games\n"
+                    f"`/history` — past game results for this server\n"
+                    f"`/villagehelp` — full command reference"
+                ),
+                inline=False
+            )
+            orient_embed.set_footer(text="Good luck. Whisperfall is watching.")
             await ch.send(embed=orient_embed)
 
             if role_name == "Cursed":
@@ -8447,6 +8506,7 @@ class ConfirmStartView(View):
             day_vote_end_time=None,
             village_chat_ch_id=village_chat_ch.id,
             win_tracker_ch_id=win_tracker_ch.id,
+            spec_qa_ch_id=spec_qa_ch.id,
             mod_dashboard_msg_id=None,
             night_bb_done=0,
             day_bb_done=0,
