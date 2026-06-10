@@ -264,6 +264,16 @@ def init_db():
                     created_at    INTEGER DEFAULT 0,
                     PRIMARY KEY (guild_id, name)
                  )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS bb_templates (
+                    guild_id      INTEGER,
+                    name          TEXT,
+                    category      TEXT DEFAULT "general",
+                    body          TEXT,
+                    tags          TEXT DEFAULT "",
+                    created_at    INTEGER DEFAULT 0,
+                    PRIMARY KEY (guild_id, name)
+                 )''')
     try:
         c.execute("ALTER TABLE elimination_log ADD COLUMN elim_type TEXT DEFAULT 'unknown'")
         c.execute("ALTER TABLE elimination_log ADD COLUMN day_or_night INTEGER DEFAULT 0")
@@ -512,6 +522,16 @@ def init_db():
     # Time Lord death flag
     try:
         c.execute("ALTER TABLE game_state ADD COLUMN time_lord_triggered INTEGER DEFAULT 0")
+    except Exception:
+        pass
+
+    # Chaos mode flags
+    try:
+        c.execute("ALTER TABLE game_state ADD COLUMN chaos_hide_roles INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        c.execute("ALTER TABLE game_state ADD COLUMN chaos_hide_count INTEGER DEFAULT 0")
     except Exception:
         pass
 
@@ -1972,6 +1992,375 @@ def db_get_elimination_log(guild_id):
     rows = c.fetchall()
     conn.close()
     return rows
+
+
+# ── Blood Board Templates ─────────────────────────────────────────────────
+
+BB_BUILTIN_TEMPLATES = [
+    ("quiet-night", "night", "quiet",
+     "Whisperfall held its breath.\n\n"
+     "No doors were forced. No paths disturbed. Whatever moves in the dark chose patience over action last night — or found nothing worth the effort.\n\n"
+     "Morning came with the same count it left with.\n\n"
+     "**Alive: {alive} remain**\n\n"
+     "*The quiet is not peace. It is waiting.*"),
+
+    ("wolf-kill", "night", "death",
+     "Something moved through Whisperfall last night with purpose.\n\n"
+     "It did not choose randomly. It chose *specifically* — a door, a name, a life that had become inconvenient to something that prefers the dark. By morning the choosing was done.\n\n"
+     "**{name} is gone.**\n\n"
+     "**Alive: {alive} remain**\n\n"
+     "*Whatever made that choice is still here. Still watching. Still counting.*"),
+
+    ("vote-elimination", "day", "vote",
+     "The village spoke today.\n\n"
+     "The arguments built the way they always do — slowly, then all at once. When the count came in, a name had risen to the top with the weight of the village behind it. The accused said their piece. It was not enough.\n\n"
+     "**{name} has been eliminated.**\n\n"
+     "**Alive: {alive} remain**\n\n"
+     "*Whether the village chose correctly, only time will answer.*"),
+
+    ("double-death", "night", "death",
+     "Whisperfall woke to two empty chairs this morning.\n\n"
+     "Two different reasons. Two different doors. The night does not always strike once.\n\n"
+     "**{name} and {name2} are gone.**\n\n"
+     "**Alive: {alive} remain**\n\n"
+     "*The count drops faster now. Whatever is left is running out of time — on both sides.*"),
+
+    ("no-vote", "day", "vote",
+     "The village said nothing today.\n\n"
+     "The vote opened. The square filled. And then — silence. Whatever resolve existed at the start of the day had dissolved into caution, uncertainty, or something that has not yet been named.\n\n"
+     "No one was eliminated.\n\n"
+     "**Alive: {alive} remain**\n\n"
+     "*The dark does not need the village to make mistakes. It only needs the village to do nothing.*"),
+
+    ("protected", "night", "quiet",
+     "Someone stood watch last night.\n\n"
+     "A vigil kept in the dark, between a door and whatever considered it. The consideration ended. Whatever came thought better of it — or found a guardian where it expected none.\n\n"
+     "**No one died.**\n\n"
+     "**Alive: {alive} remain**\n\n"
+     "*The effort was real. The danger was real. This time, it was enough.*"),
+
+    ("turned", "night", "turn",
+     "Whisperfall is not the same village it was yesterday.\n\n"
+     "Something crossed a line last night that cannot be uncrossed. Words spoken in the dark between people who should not have been speaking. Someone who stood with the village when the sun went down did not stand with it when it rose.\n\n"
+     "**The village does not yet know who is missing from its ranks.**\n\n"
+     "**Alive: {alive} remain**\n\n"
+     "*The count has not changed. The balance has.*"),
+
+    ("missed-votes", "day", "participation",
+     "The village does not forgive silence.\n\n"
+     "They were there. They had voices. When the square filled and the names were called, they said nothing. By morning, their doors were found open.\n\n"
+     "**{name} has been removed for failing to vote.**\n\n"
+     "**Alive: {alive} remain**\n\n"
+     "*Whisperfall requires participation. It always has.*"),
+
+    ("investigation-clear", "night", "investigation",
+     "Eyes moved through Whisperfall last night, searching for the shape of something wrong.\n\n"
+     "What came back was cleaner than expected. Quieter than feared. Whatever they were looking for, they did not find it where they looked.\n\n"
+     "**No deaths. No disruptions.**\n\n"
+     "**Alive: {alive} remain**\n\n"
+     "*Some nights the darkness simply watches. Tonight was one of those nights.*"),
+
+    ("game-end-village", "end", "victory",
+     "It is over.\n\n"
+     "The last of what hunted Whisperfall has been found and removed. The square is quieter than it has been in days — not the quiet of waiting, not the quiet of something patient in the dark. The quiet of a village that has survived what came for it.\n\n"
+     "**The village stands.**\n\n"
+     "*Whisperfall endures.*"),
+
+    ("game-end-wolf", "end", "victory",
+     "It is over.\n\n"
+     "The village fought. It investigated. It voted and argued and pointed fingers across the square with the particular desperation of people who knew the stakes. In the end, it was not enough.\n\n"
+     "**The dark has won.**\n\n"
+     "*Whisperfall falls silent — not with relief, but with finality.*"),
+]
+
+# ── Role-specific Blood Board hint templates ──────────────────────────────
+# Each entry: {event_type: hint_body}
+# event_type: "killed" | "voted_out" | "ability" | "investigation_good" | "investigation_bad"
+# Placeholders: {name} = player name, {alive} = alive count, {target} = target name
+
+BB_ROLE_HINTS = {
+    "Villager": {
+        "killed":    "A door was left open this morning that was not open last night.\n\n{name} had no special gift, no particular power — only presence and a willingness to show up. The village loses that more than it knows.\n\n**Alive: {alive} remain**\n\n*Sometimes the simplest losses are the ones that compound.*",
+        "voted_out": "The village cast its vote and the count settled on {name}.\n\nThey held no secrets. Whatever the village thought they saw, the morning air is unchanged — the same threat, one fewer neighbor.\n\n**Alive: {alive} remain**\n\n*Not every vote costs the same. This one may have been expensive.*",
+    },
+    "Seer": {
+        "killed":             "They came for someone specific last night.\n\nThis was not a random door. Something in Whisperfall understood what it was removing — the slow accumulation of truth in a place that runs on lies. Something noticed, and acted.\n\n*The veil will not be parted again. Not by these eyes.*\n\n**Alive: {alive} remain**\n\n*The hunters are now hunting blind.*",
+        "voted_out":          "The village removed something it will not be able to replace.\n\nA particular kind of clarity walked out of the square today. Whether the village understood what it was discarding is unlikely.\n\n**Alive: {alive} remain**\n\n*There will be questions in the days ahead that will simply go unanswered.*",
+        "investigation_good": "Eyes searched the dark last night and came back with something clean.\n\nThe read was clear — whatever was suspected, the answer was not the one the darkness would have wanted known. One name can be set aside. For now.\n\n**Alive: {alive} remain**\n\n*One less shadow in a square full of them.*",
+        "investigation_bad":  "Eyes moved through Whisperfall last night and found something wrong.\n\nThe truth that came back was not comfortable. The kind of answer that sits in a chest and does not let you sleep, because now you know something the rest of the village doesn't.\n\n**Alive: {alive} remain**\n\n*The veil has parted. What was seen cannot be unseen.*",
+    },
+    "Doctor": {
+        "killed":    "The dark was deliberate last night.\n\nIt struck at the one who had been standing between it and what it wanted. Quiet work. The kind that shows up in the negative space — in the mornings that came without a body.\n\n*Those mornings may start looking different now.*\n\n**Alive: {alive} remain**\n\n*Someone will take a wound that doesn't close the way it should. They won't know why.*",
+        "voted_out": "The village dismantled one of its own defenses today and called it justice.\n\nThey mistook the healer for the harm.\n\n**Alive: {alive} remain**\n\n*Whatever comes tonight will find fewer doors defended.*",
+        "ability":   "A careful hand was placed between the dark and a door last night.\n\nThe threat arrived. The protection held. Someone in Whisperfall woke this morning without knowing how close the night had come.\n\n**Alive: {alive} remain**\n\n*The vigil was kept. The cost was paid by someone else.*",
+    },
+    "Surgeon": {
+        "killed":    "Something in Whisperfall that knew how to save lives will save no more.\n\nThe dark chose the hands that could undo what it does — the ones that understood the difference between damage and death. Those hands are still now.\n\n**Alive: {alive} remain**\n\n*The next wound may not be survivable.*",
+        "voted_out": "The village removed a particular kind of competence from its ranks today.\n\nNot loud. Not visible. The kind that works in the background and registers only in its absence.\n\n**Alive: {alive} remain**\n\n*Whisperfall will feel this. Just not yet.*",
+        "ability":   "A precise hand intervened last night where it should not have been needed.\n\nWhatever the dark intended, it did not get what it came for.\n\n**Alive: {alive} remain**",
+    },
+    "Huntsman": {
+        "killed":       "The one who guarded the doors is gone.\n\nThey had stood watch before — quiet, patient, positioned between the dark and someone who needed protecting. Last night something found them instead.\n\n**Alive: {alive} remain**\n\n*Whatever comes for doors now will find them undefended.*",
+        "voted_out":    "The village voted out its own shelter today.\n\nWhat left the square had been standing between Whisperfall and the dark on specific, chosen nights. That protection is gone.\n\n**Alive: {alive} remain**",
+        "ability":      "A vigil was kept last night. A threshold held.\n\nSomething considered a door and found it occupied. This time, it was not needed — but the act of being ready meant the night had less room to work.\n\n**Alive: {alive} remain**\n\n*The guardian was prepared. The dark reconsidered.*",
+        "ability_kill": "A vigil was kept last night. The door was tested.\n\nWhatever came for that threshold found someone already there — hand steady, ready for exactly this. The collision was brief. Final.\n\n**Alive: {alive} remain**\n\n*The guardian held the line. The cost was mutual.*",
+    },
+    "Sheriff": {
+        "killed":             "Something in Whisperfall that watched people too carefully has been removed.\n\nNot the loudest voice. The one who had been quietly taking stock — reading patterns, measuring reactions, building a picture from the pieces others did not think to collect. That picture dies with them.\n\n**Alive: {alive} remain**\n\n*Whatever they were close to knowing, they will not share it now.*",
+        "voted_out":          "The village removed a steady eye from the square today.\n\nThe accused had a habit of noticing things. Whether that made them dangerous or simply conspicuous, the square has decided.\n\n**Alive: {alive} remain**",
+        "investigation_good": "A careful read was made last night, and it came back clean.\n\nOne less shadow on a name. One less question where the answer costs something.\n\n**Alive: {alive} remain**",
+        "investigation_bad":  "A careful read was made last night, and it did not come back clean.\n\nSomething was confirmed that changes how the board looks — quietly, privately. The question now is what to do with what is known.\n\n**Alive: {alive} remain**",
+    },
+    "Medium": {
+        "killed":             "The bridge between Whisperfall and its dead has been cut.\n\nSomething that could ask questions across a line most cannot cross has been removed. Whatever answers were still coming will not arrive now.\n\n**Alive: {alive} remain**\n\n*The dead have something to say. There is no longer anyone to hear it.*",
+        "voted_out":          "The village silenced its own connection to the dead today.\n\nThe accused had access to something the rest of the square did not — a kind of knowledge that comes from paying attention to the ones who are no longer here to speak for themselves.\n\n**Alive: {alive} remain**",
+        "investigation_good": "The dead spoke last night of someone still living.\n\nWhat they said was not damning. A clean read from a source that has little reason to lie.\n\n**Alive: {alive} remain**",
+        "investigation_bad":  "The dead spoke last night of someone still living.\n\nWhat they said was not comfortable. The kind of answer that changes how a face looks in the square.\n\n**Alive: {alive} remain**",
+    },
+    "Bloodhound": {
+        "killed":    "The den lost something last night it had not expected to lose.\n\nA particular kind of precision — the ability to read a life at close range and return with something exact, something that cannot be argued with. Whatever hunts in Whisperfall will hunt with less certainty now.\n\n**Alive: {alive} remain**",
+        "voted_out": "Something was removed from the board today that had been feeding information to the wrong side.\n\nWhatever was reading people so precisely, so specifically — that particular attention has been ended.\n\n**Alive: {alive} remain**\n\n*The den is quieter. Not from grief.*",
+        "ability":   "A scan moved through Whisperfall last night, reading someone with precision.\n\nWhat came back was exact — not a feeling, not a suspicion, but a name and a truth attached to it. Somewhere in the dark, a complete picture of someone landed where it was not welcome for that person.\n\n**Alive: {alive} remain**",
+    },
+    "Bloodletter": {
+        "killed":    "Hands that knew how to make things worse before they got better are still now.\n\nThe work was not gentle. It left marks. But it was purposeful — the kind of intervention that looks like harm until it resolves.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village mistook the wound for the wound-maker today.\n\nThere will be nights ahead when someone bleeds longer than they should, and there will be no one left who understands why.\n\n**Alive: {alive} remain**",
+        "ability":   "A careful mark was made last night in the dark.\n\nSomething deliberate. Something that will matter later, when the right conditions arrive. The marked does not know. The village does not know.\n\n**Alive: {alive} remain**",
+    },
+    "Agitator": {
+        "killed":    "The voice that kept the square restless is silent.\n\nSomething that pushed the village toward urgency — that refused to let the vote settle into comfort, that demanded a second reckoning when one wasn't enough — has been ended.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village silenced its own provocateur today.\n\nThe square will be calmer without them. Whether calm serves Whisperfall right now is a different question.\n\n**Alive: {alive} remain**",
+        "ability":   "The square demanded more of itself today.\n\nOne voice pushed for a second reckoning. The village must now cast not one vote, but two.\n\n**⚡ Frenzy — two votes required today.**\n\n**Alive: {alive} remain**",
+    },
+    "Hermit": {
+        "killed":    "The one who knew how to make others hard to find has been found anyway.\n\nWhatever gift they had for shielding, they could not turn it on themselves.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village removed someone who had kept to the margins today.\n\nThe accused had a habit of shielding things — of putting themselves between what was vulnerable and what was coming for it.\n\n**Alive: {alive} remain**",
+        "ability":   "Someone in Whisperfall was made harder to find today.\n\nA quiet act that rearranged the lines of sight in the square without anyone noticing. The target of the vote may not land where it was aimed.\n\n**Alive: {alive} remain**",
+    },
+    "Governor": {
+        "killed":    "An old authority has been removed from Whisperfall.\n\nWhatever power it held to stay the hand of the village — to pull the rope back at the last moment — is gone.\n\n**Alive: {alive} remain**\n\n*The condemned will find no reprieve from here.*",
+        "voted_out": "The village eliminated its own last line of mercy today.\n\nThe accused carried the word that stops the sentence, the hand that holds the rope. It walks out of the square with them.\n\n**Alive: {alive} remain**",
+        "ability":   "An old authority stirred in Whisperfall today.\n\nA hand was raised. A word was spoken — the kind that does not ask permission. The accused walked free. The village stared.\n\n**Alive: {alive} remain**\n\n*The power was spent. It will not be spent again.*",
+    },
+    "Cupid": {
+        "killed":    "The architect of bonds is gone. The architecture remains.\n\nSomething that connected two lives without their full knowledge has been removed. But the connections it made in those early hours did not leave with it.\n\n*Thread does not break when the needle is taken away.*\n\n**Alive: {alive} remain**",
+        "voted_out": "The village voted out something it may not have understood today.\n\nWhatever invisible lines they drew between people in the village are still drawn.\n\n**Alive: {alive} remain**\n\n*Some bonds do not require the one who made them to sustain them.*",
+        "ability":   "An invisible thread was drawn through Whisperfall last night.\n\nTwo people are now connected in a way neither fully comprehends. Whatever this means will become clear at the worst possible moment.\n\n**Alive: {alive} remain**",
+    },
+    "Time Lord": {
+        "killed":    "Something shifted in Whisperfall last night that has no visible cause.\n\nThe days feel shorter. Whatever governed the rhythm of this village — the pace of its nights, the length of its days — has been disrupted. Things will move faster now.\n\n*Because of what it lost.*\n\n**Alive: {alive} remain**",
+        "voted_out": "The village chose today, and the choice had consequences no one anticipated.\n\nWhat left the square carried something nobody noticed until it was gone — a particular relationship with time and pace. There is less of both now.\n\n**Alive: {alive} remain**\n\n*The clock has accelerated. Whisperfall will feel it.*",
+    },
+    "Drunk": {
+        "killed":    "A familiar presence stumbled out of Whisperfall last night and did not find its way back.\n\nNot the sharpest voice. But present, in their particular way, with a warmth that made the village feel like a place where people actually lived.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village voted someone out today who may not have fully understood what was happening.\n\nThe accused had that quality — slightly out of step, pleasantly uncertain. Whether the confusion was genuine or performed, the vote has seen through it.\n\n**Alive: {alive} remain**",
+    },
+    "Witch": {
+        "killed":       "A particular kind of power has gone cold in Whisperfall.\n\nSomething that could both give life and take it — that held two opposite capabilities in careful balance — has been removed from the board.\n\n**Alive: {alive} remain**",
+        "voted_out":    "The village removed an unpredictable force from the square today.\n\nThe accused had the quality of a wildcard — capable of shifting the night's outcome in either direction. Whatever they were holding, they take with them.\n\n**Alive: {alive} remain**",
+        "ability_save": "A hand intervened last night where it was not expected.\n\nSomething that should have been lost was not — turned back from the edge by a choice made in the dark. The saved does not know how close it was.\n\n**Alive: {alive} remain**",
+        "ability_kill": "A quiet poison moved through Whisperfall last night.\n\nNot dramatic. Not visible. The kind of end that arrives slowly, in the morning hours rather than at the door.\n\n**Alive: {alive} remain**",
+    },
+    "Shapeshifter": {
+        "killed":    "Something in Whisperfall that was never quite one thing has become nothing.\n\nThey had been wearing shapes — inhabiting identities, carrying the surface of other people. Last night something found them beneath whatever they were wearing.\n\n**Alive: {alive} remain**\n\n*The face it died in was not the one it started with.*",
+        "voted_out": "The village voted out something it may not have fully understood today.\n\nWhat stood in that square had been through more than one shape during this game. Whether the village voted the right version — the right layer — is more complicated than it appears.\n\n**Alive: {alive} remain**",
+        "ability":   "Something changed in Whisperfall overnight.\n\nA presence in the square that feels subtly different than it did yesterday — but cannot be pinned down. Whatever the shift was, it was chosen deliberately.\n\n**Alive: {alive} remain**\n\n*The village does not know yet. It rarely does, at first.*",
+    },
+    "Alpha": {
+        "killed":        "The village removed something that leads.\n\nNot loudly. But with a particular gravity — a quality of knowing where to stand so that others follow without quite deciding to. That gravity is gone from the dark side of Whisperfall.\n\n**Alive: {alive} remain**\n\n*The pack is leaderless. Or it has found a new one. The village does not yet know which.*",
+        "voted_out":     "The square found something today worth ending.\n\nThe accused moved through Whisperfall with the weight of someone who knows exactly where they stand and has made peace with what that means. The village felt it.\n\n**Alive: {alive} remain**",
+        "ability":       "Something shifted in Whisperfall last night that will not be visible for some time.\n\nWords were spoken that cannot be unspoken. Someone who stood with the village when the sun went down does not stand with it now.\n\n**Alive: {alive} remain**\n\n*The count has not changed. The balance has.*",
+        "ability_fail":  "Something attempted in Whisperfall last night did not take.\n\nThe persuasion was made. Whatever was offered was not enough — the target did not cross the line. The night's work came back empty.\n\n**Alive: {alive} remain**",
+    },
+    "Elite Alpha": {
+        "killed":    "A patient threat has been removed from Whisperfall.\n\nSomething that worked across multiple nights — not rushing, not overreaching — has been ended before it could finish. The second attempt will not come.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village found something with reach today and cut it off.\n\nThe accused had been building something across nights rather than acting in a single moment. The square has ended the game before the finish.\n\n**Alive: {alive} remain**",
+        "ability":   "Another line was crossed in Whisperfall last night.\n\nThe second persuasion, more careful than the first. Another face wearing a different allegiance than it wore to sleep. The village cannot see the change. The change is real.\n\n**Alive: {alive} remain**",
+    },
+    "Wolf Pup": {
+        "killed":    "The den has lost something that protected it in a specific way.\n\nNot a killer — something that managed the flow of the night, that made certain paths unavailable to certain people. That particular kind of interference is gone.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village removed a disruptive force from the dark side of the square today.\n\nThe accused had been doing something in the nights that the village never fully saw — redirecting, blocking, making the night less navigable for those who needed to navigate it.\n\n**Alive: {alive} remain**",
+        "ability":   "Someone in Whisperfall found their night interrupted.\n\nAn obstacle placed not by chance but by design — something that understood what they were going to do and decided they would not do it.\n\n**Alive: {alive} remain**",
+    },
+    "Shadow Wolf": {
+        "killed":    "The threat does not fully end with a burial in Whisperfall.\n\nSomething was removed from the living square — but removal is not the same as silence. Whatever moved through the dark in life may yet move through it in death.\n\n**Alive: {alive} remain**\n\n*In Whisperfall, some things do not stay gone.*",
+        "voted_out": "The village removed something today that may continue to act.\n\nWhether the vote achieved what the village intended it to achieve is a question that may answer itself in the nights ahead.\n\n**Alive: {alive} remain**",
+        "ability":   "Something moved through Whisperfall last night that should not have been able to.\n\nA presence in the dark that continues its work beyond the point where such work should be possible.\n\n**{name} did not survive the night.**\n\n**Alive: {alive} remain**",
+    },
+    "White Wolf": {
+        "killed":    "A solitary hunter has been removed from the board.\n\nSomething that worked alone — that chose its targets by its own accounting, that served no pack and answered to nothing but its own particular standard — has been ended.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village removed something that answered to no one today.\n\nThe accused operated by rules that neither the village nor the dark set, selecting targets by criteria nobody else could read. That particular independence is gone.\n\n**Alive: {alive} remain**",
+        "ability":   "A solitary kill moved through Whisperfall last night.\n\nNot the work of the pack. One name, one door, one decision made by something operating entirely alone.\n\n**{name} did not survive the night.**\n\n**Alive: {alive} remain**",
+    },
+    "Werekitten": {
+        "killed":    "Something small and dangerous has been removed from Whisperfall.\n\nNot quite what it appeared to be, not quite what the dark usually sends. The square will feel its absence differently than it expects to.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village made a choice today that was correct for reasons it may not fully understand.\n\nThe accused was not the most obvious threat — small and difficult to pin down, right up until it wasn't.\n\n**Alive: {alive} remain**",
+        "ability":   "Something moved through Whisperfall last night by a route the village wasn't watching.\n\nNot through the usual doors. A different kind of violence — lighter, more precise, more difficult to trace.\n\n**{name} did not survive the night.**\n\n**Alive: {alive} remain**",
+    },
+    "Traitor": {
+        "killed":    "A line was crossed in Whisperfall that cannot be uncrossed.\n\nSomething that started in one place and ended in another — that shifted allegiances in the dark — has been removed. The village may never know the full shape of what it killed.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village removed someone whose relationship to its own side had become complicated.\n\nThe accused had not always been what they were when they stood in that square. The vote caught what the village thought they were seeing.\n\n**Alive: {alive} remain**",
+    },
+    "Wraith": {
+        "killed":       "One of the shadows has been removed. Not all of them.\n\nSomething that existed as part of a pair has been ended. The pair is now one. The one may still act.\n\n**Alive: {alive} remain**\n\n*In Whisperfall, a single survivor inherits everything.*",
+        "voted_out":    "The village removed something today that had been making marks.\n\nThe accused had been watching who moved, who interacted, who might be the right choice for a different kind of ending. Whatever list they were building is half-empty now. The other half remains.\n\n**Alive: {alive} remain**",
+        "ability_mark": "Something passed through Whisperfall last night without leaving a visible trace.\n\nA mark was made on someone who does not know they have been marked. It will only matter at the moment of the command.\n\n**Alive: {alive} remain**",
+        "ability_kill": "The command was given last night.\n\nEvery mark that had been placed — quietly, carefully — was called due simultaneously. The village wakes to a different number than it went to sleep with.\n\n**Alive: {alive} remain**\n\n*Whisperfall counted wrong. It always does, until it has to count again.*",
+    },
+    "Fairy Elf": {
+        "killed":    "Something delicate has been removed from Whisperfall.\n\nNot threatening. Not loud. The kind of presence that sits at the edges and wants something specific and personal from the outcome — not what the village wants, not what the dark wants. Something else entirely.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village removed a third element from the square today.\n\nThe accused had never fully belonged to either side of Whisperfall's conflict. Whatever they were working toward was their own — a private agenda running parallel to the main event.\n\n**Alive: {alive} remain**",
+    },
+    "Wolf": {
+        "killed":    "The village removed one of the threats that had been walking among it.\n\nThe den is smaller now. Whatever coordinated in the dark does so with one fewer voice.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village got one right today.\n\nThe square pointed at something that was actually dangerous and the count confirmed the instinct.\n\n**Alive: {alive} remain**\n\n*The pack is smaller. The hunt continues.*",
+        "ability":   "The dark moved through Whisperfall last night and took what it came for.\n\nA door was chosen. A name was decided. The morning arrived with one fewer person than the evening left with.\n\n**{name} is gone.**\n\n**Alive: {alive} remain**",
+    },
+    "Elder": {
+        "killed":    "The dark tried once and was turned away. The second time, it was not.\n\nSomething that had survived an attack that would have ended anyone else — weathered it, endured it, continued to stand — found the second attempt more careful.\n\n**Alive: {alive} remain**\n\n*Whatever resilience protected them is exhausted now.*",
+        "voted_out": "The village removed a stubborn presence from the square today.\n\nThe accused had a quality of survival about them — not of luck, but of endurance. They had lasted when others hadn't.\n\n**Alive: {alive} remain**",
+    },
+    "Mayor": {
+        "killed":    "A voice the village listened to is gone.\n\nSomething carried authority in the square — not by demand, but by the particular weight of being the kind of person others defer to without quite deciding to.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village removed one of its own figures of standing today.\n\nThe accused carried a kind of influence that persisted even when it should not have. Whether the village voted the right version of the danger, the count does not require understanding.\n\n**Alive: {alive} remain**",
+    },
+    "Insomniac": {
+        "killed":    "The one who stayed awake has been silenced.\n\nWhile others slept, they watched — not with any particular power, but with the stubborn refusal to stop paying attention. They noticed things. The dark noticed them noticing.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village removed its most wakeful member today.\n\nThe accused had a habit of knowing who moved, who lingered, who appeared where they should not have been.\n\n**Alive: {alive} remain**",
+        "ability":   "While Whisperfall slept last night, one pair of eyes remained open.\n\nWhat they registered — who moved past what threshold, what shadows overlapped — has been noted. By someone who has learned that the most important things happen when everyone else assumes the village is asleep.\n\n**Alive: {alive} remain**",
+    },
+    "Oracle": {
+        "killed":    "A question that was going to be asked will not be asked now.\n\nSomething that made careful, pointed inquiries — the kind that return with yes or no but carry certainty — was removed before one more question could be posed.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village silenced a questioner today.\n\nThe accused had a method — not a gift exactly, but a persistence of inquiry that made the dark uncomfortable.\n\n**Alive: {alive} remain**",
+        "ability":   "A question was asked in Whisperfall last night that had only one answer.\n\nYes or no. Nothing in between. The one who asked now carries something the rest of the village cannot see.\n\n**Alive: {alive} remain**",
+    },
+    "Jafar": {
+        "killed":    "Something unpredictable has been removed from Whisperfall.\n\nThe dark does not like variables — the player who shows up differently each morning, carrying something unexpected. That variability has been ended.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village removed its most unpredictable element today.\n\nThe accused never quite showed up the same way twice — a different calculation, a different set of priorities each day.\n\n**Alive: {alive} remain**",
+    },
+    "Dire Wolf": {
+        "killed":    "A bond was tested last night.\n\nSomething moved through Whisperfall and found the one who carried an invisible thread — attached to another life. That attachment now pulls from one side only.\n\n**Alive: {alive} remain**\n\n*What was bound to the fallen will feel it. Perhaps has already.*",
+        "voted_out": "The village removed a particular kind of attachment today.\n\nThe accused had connected themselves to someone else early in the game. Whatever that connection meant, one end of it has been severed.\n\n**Alive: {alive} remain**",
+        "ability":   "A bond was formed in Whisperfall last night between two lives that did not know they were being connected.\n\nIt was not their choice. It is not reversible.\n\n**Alive: {alive} remain**",
+    },
+    "Crazed Wolf": {
+        "killed":    "Something unpredictable within the dark has been ended.\n\nNot methodical. Not strategic. The kind of threat that operates outside the careful calculus of the pack.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village removed a chaotic element from the square today.\n\nThe accused was never easy to read — moved differently, operated by a different logic.\n\n**Alive: {alive} remain**",
+    },
+    "Blessed Wolf": {
+        "killed":    "Something in Whisperfall that carried an unusual protection is gone.\n\nThe dark does not usually lose when it acts — but something had been shielded against the usual methods. Whatever that protection was, it was not infinite.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village removed something today that had been harder to kill than it looked.\n\nThe accused had a particular resistance about them — not obvious, not visible, but persistent.\n\n**Alive: {alive} remain**",
+    },
+    "Warlock": {
+        "killed":    "A particular kind of interference with the truth has been removed.\n\nSomething that could bend what investigations found — that sat in the path of certainty and redirected it — is gone.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village removed something today that may have been distorting what it could see.\n\nThe accused had an effect on the information that moved through Whisperfall — bending the light around them without announcing it.\n\n**Alive: {alive} remain**",
+    },
+    "Lycan": {
+        "killed":    "The dark killed something last night that was not what it appeared to be.\n\nSomething sat differently about them. The village may never know what, or why, or how close the read actually was.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village voted out someone who had always sat at a strange angle to the square.\n\nNot wolf. Not fully village. Something in between — the kind of presence that registers wrong without being wrong.\n\n**Alive: {alive} remain**",
+    },
+    "Virgin": {
+        "killed":    "Something untested has been removed before it could be tested.\n\nThey had moved through the village without becoming the focus of the square's suspicion. That particular untouched quality will not protect anything now.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village named someone today who had never been named before.\n\nThe accusation was the first. Whatever that speaks to — their innocence or their skill — the vote has its own answer.\n\n**Alive: {alive} remain**",
+    },
+    "Gravedigger": {
+        "killed":    "The one who kept account of the dead has joined them.\n\nSomething that watched what the departed left behind — that understood the pattern of loss — has been removed. Whatever records were being kept exist only in memory now.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village removed its own keeper of records today.\n\nThe accused had a particular relationship with the dead — not grief exactly, but attention.\n\n**Alive: {alive} remain**",
+        "ability":   "A careful accounting was made last night of what the dead carried with them.\n\nSomething was recovered from the departed — information, perhaps, or the shape of a truth that didn't make it to morning.\n\n**Alive: {alive} remain**",
+    },
+    "Pothead": {
+        "killed":    "The night found someone who was not quite paying full attention, and that was enough.\n\nThey moved through Whisperfall with a particular relationship to urgency — or a particular lack of relationship to it.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village voted out a foggy presence today.\n\nThe accused occupied the square at a slight remove — not quite in step with the proceedings, not quite sure what was being asked of them.\n\n**Alive: {alive} remain**",
+    },
+    "Diseased": {
+        "killed":    "The dark made a mistake last night and does not yet know it.\n\nA door was chosen, a life was taken — and whatever opened that door is now carrying something it did not intend to pick up.\n\n**Alive: {alive} remain**\n\n*Not every kill in Whisperfall costs the same. This one will cost more.*",
+        "voted_out": "The village removed a complication from the square today.\n\nThe accused had a quality that made them a risky target — something that passed consequences along to whoever chose them.\n\n**Alive: {alive} remain**",
+    },
+    "Echo-Stalker": {
+        "killed":    "A presence that followed has been removed.\n\nSomething that drew its purpose from proximity — from being the shadow of someone else's threat — has been ended.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village voted out a ghost today.\n\nThe accused moved through the square as an extension of something else — present but dependent, dangerous but borrowed.\n\n**Alive: {alive} remain**",
+    },
+    "Clone": {
+        "killed":    "A mirror has been broken.\n\nSomething that had been borrowing from another — drawing shape from someone else's presence — has been ended.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village removed a borrowed presence from the square today.\n\nThe accused had never been entirely their own thing. Whatever they had taken from another player and carried is gone with them.\n\n**Alive: {alive} remain**",
+    },
+    "Village Idiot": {
+        "killed":    "A kind of innocence has left Whisperfall.\n\nSomething that wandered through the square with a particular guilelessness — that never quite understood what they were surrounded by — has been taken.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village voted out one of its own today who may not have deserved it.\n\nThe accused had an openness, an absence of guile — that in a different kind of village would have been a virtue. In Whisperfall, it read as suspicious.\n\n**Alive: {alive} remain**",
+    },
+    "Village Jokester": {
+        "killed":    "Whisperfall is quieter this morning in a way that is hard to explain.\n\nNot the quieter of safety. The quieter of something missing that used to interrupt the silence — that refused to let the weight of the game swallow the people playing it.\n\n**Alive: {alive} remain**",
+        "voted_out": "The square removed its levity today.\n\nThe accused had a talent for puncturing the solemnity of a game that takes itself very seriously.\n\n**Alive: {alive} remain**",
+    },
+    "Prostitute": {
+        "killed":    "A particular kind of interference has been removed from the board.\n\nSomething that moved between Whisperfall's nights and its people — occupying attention, redirecting purpose — will not move that way again.\n\n**Alive: {alive} remain**",
+        "voted_out": "The village removed a disruptive presence today.\n\nThe accused had a talent for occupying the right space at the wrong time — or the wrong space at the right time.\n\n**Alive: {alive} remain**",
+        "ability":   "Someone in Whisperfall found their night occupied by an unexpected visitor.\n\nWhatever they had intended to do was not done. Their purpose was redirected by something closer and more immediate.\n\n**Alive: {alive} remain**",
+    },
+}
+
+
+def get_bb_hints_for_game(guild_id: int) -> dict:
+    """Return only role hints for roles currently in the active game."""
+    rows = db_get_assignments(guild_id)
+    if not rows:
+        return BB_ROLE_HINTS
+    game_roles = {r[1] for r in rows}
+    return {role: hints for role, hints in BB_ROLE_HINTS.items() if role in game_roles}
+
+
+
+def db_seed_bb_templates(guild_id):
+    """Insert built-in templates for a guild if they don't already exist."""
+    import time as _tbb
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    for name, category, tags, body in BB_BUILTIN_TEMPLATES:
+        c.execute("INSERT OR IGNORE INTO bb_templates VALUES (?,?,?,?,?,?)",
+                  (guild_id, name, category, body, tags, int(_tbb.time())))
+    conn.commit()
+    conn.close()
+
+def db_save_bb_template(guild_id, name: str, category: str, body: str, tags: str = ""):
+    import time as _tbb
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO bb_templates VALUES (?,?,?,?,?,?)",
+              (guild_id, name.lower().strip(), category, body, tags, int(_tbb.time())))
+    conn.commit()
+    conn.close()
+
+def db_get_bb_templates(guild_id, category: str = None):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    if category:
+        c.execute("SELECT name, category, body, tags FROM bb_templates "
+                  "WHERE guild_id=? AND category=? ORDER BY name",
+                  (guild_id, category))
+    else:
+        c.execute("SELECT name, category, body, tags FROM bb_templates "
+                  "WHERE guild_id=? ORDER BY category, name",
+                  (guild_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def db_get_bb_template(guild_id, name: str):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT name, category, body, tags FROM bb_templates WHERE guild_id=? AND name=?",
+              (guild_id, name.lower().strip()))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+def db_delete_bb_template(guild_id, name: str):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("DELETE FROM bb_templates WHERE guild_id=? AND name=?",
+              (guild_id, name.lower().strip()))
+    conn.commit()
+    conn.close()
 
 
 def db_save_template(guild_id, name: str, role_counts: dict, description: str = ""):
@@ -4243,6 +4632,9 @@ async def _run_start_day(guild, guild_id, night_num, state):
 
     # Send Governor and Hermit their day ability buttons
     safe_task(_send_day_ability_buttons(guild, guild_id, end_ts), "day_ability_buttons")
+    # Vote countdown reminder and night approach warning
+    safe_task(_vote_countdown_reminder(guild, guild_id, int(end_ts)), "vote_reminder")
+    safe_task(_night_approach_warning(guild, guild_id), "night_warning")
 
 
 
@@ -6490,7 +6882,7 @@ async def _run_start_night(guild, guild_id, night_num, duration, state):
                 "Shapeshifter":"Choose a player to shapeshift into (Night 1 only).",
                 "Cupid":"Bind two players together tonight.",
                 "Wolf Pup":"Choose a player to block.",
-                "Alpha":"Choose a villager to attempt a turn, or skip.",
+                "Alpha":"Choose a villager to attempt a turn, or skip. (One use per game — button will be disabled after use.)",
                 "Elite Alpha":"Choose a villager to attempt a turn, or skip.",
                 "Bloodhound":"Choose a player to identify. (Available from Night 2)",
                 "Bloodletter":"Mark a target with wolf blood, or skip.",
@@ -6643,7 +7035,8 @@ async def on_ready():
     # Load default roles for every guild the bot is in
     for guild in client.guilds:
         load_default_roles(guild.id)
-    print(f"Default roles checked for {len(client.guilds)} guild(s)")
+        db_seed_bb_templates(guild.id)
+    print(f"Default roles and BB templates checked for {len(client.guilds)} guild(s)")
     # Global sync — commands available on every server the bot joins.
     # Note: global commands can take up to 1 hour to appear after first deploy.
     # To force instant sync on YOUR server during development, set GUILD_ID env var.
@@ -6781,6 +7174,7 @@ async def on_guild_join(guild: discord.Guild):
     """When the bot joins a new server — load default roles and sync commands."""
     print(f"Joined new guild: {guild.name} ({guild.id})")
     load_default_roles(guild.id)
+    db_seed_bb_templates(guild.id)
     # Instantly sync slash commands to this guild
     try:
         tree.copy_global_to(guild=guild)
@@ -6966,10 +7360,11 @@ async def on_message(message: discord.Message):
     """Watch village-chat and have NPCs respond naturally."""
     if message.author.bot:
         return
-    # Track message counts for active players during day phase
+    # Track message counts — village-chat only, alive players only, any phase
     if message.guild and game_active(message.guild.id):
-        state_msg = db_get_state(message.guild.id)
-        if state_msg and state_msg.get("phase") == "day":
+        state_msg   = db_get_state(message.guild.id)
+        vc_id       = state_msg.get("village_chat_ch_id") if state_msg else None
+        if vc_id and message.channel.id == vc_id:
             rows_msg = db_get_assignments(message.guild.id)
             if any(r[0] == message.author.id and r[2] == 1 for r in rows_msg):
                 day_num_msg = db_get_night_num(message.guild.id)
@@ -7681,7 +8076,7 @@ class RoleBuilderView(View):
             return
 
         npc_count = self.npc_count
-        view  = ConfirmStartView(interaction.guild_id, final_counts, self.all_roles, npc_count)
+        view  = ChaosModeView(interaction.guild_id, final_counts, self.all_roles, npc_count)
         total = sum(final_counts.values())
         npc_line = f"\n🤖 **{npc_count} NPC(s)** will be auto-generated and fill {npc_count} of the {total} slots." if npc_count else ""
         human_needed = total - npc_count
@@ -7731,7 +8126,7 @@ class ReplayWarningView(View):
         self.add_item(no)
 
     async def on_yes(self, interaction: discord.Interaction):
-        view  = ConfirmStartView(self.guild_id, self.final_counts, self.all_roles, self.npc_count)
+        view  = ChaosModeView(self.guild_id, self.final_counts, self.all_roles, self.npc_count)
         total = sum(self.final_counts.values())
         human_needed = total - self.npc_count
         await interaction.response.edit_message(
@@ -7801,13 +8196,70 @@ def build_role_card(player: discord.Member, role_name: str, role_info: dict, fon
     return embed
 
 
-class ConfirmStartView(View):
+class ChaosModeView(View):
+    """
+    Shown after roster confirmation — lets mod pick a chaos mode before launching.
+    Three options: Normal, Partial Chaos (hidden roles), Hidden Count (unknown players),
+    Full Chaos (both hidden).
+    """
     def __init__(self, guild_id, final_counts, all_roles, npc_count=0):
         super().__init__(timeout=300)
         self.guild_id     = guild_id
         self.final_counts = final_counts
         self.all_roles    = all_roles
         self.npc_count    = npc_count
+
+        normal_btn  = Button(label="🎮 Normal Game",                        style=discord.ButtonStyle.green,     row=0)
+        role_btn    = Button(label="🎭 Partial Chaos — Hidden Roster",        style=discord.ButtonStyle.primary,   row=0)
+        count_btn   = Button(label="👥 Hidden Count — Unknown Players",       style=discord.ButtonStyle.primary,   row=1)
+        full_btn    = Button(label="🌪️ Full Chaos — Roster + Count Hidden",   style=discord.ButtonStyle.danger,    row=1)
+        cancel_btn  = Button(label="Cancel",                                   style=discord.ButtonStyle.secondary, row=2)
+
+        normal_btn.callback  = lambda i: self._launch(i, hide_roles=False, hide_count=False)
+        role_btn.callback    = lambda i: self._launch(i, hide_roles=True,  hide_count=False)
+        count_btn.callback   = lambda i: self._launch(i, hide_roles=False, hide_count=True)
+        full_btn.callback    = lambda i: self._launch(i, hide_roles=True,  hide_count=True)
+        cancel_btn.callback  = self.on_cancel
+
+        self.add_item(normal_btn)
+        self.add_item(role_btn)
+        self.add_item(count_btn)
+        self.add_item(full_btn)
+        self.add_item(cancel_btn)
+
+    async def on_cancel(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(content="❌ Game start cancelled.", view=None)
+        self.stop()
+
+    async def _launch(self, interaction: discord.Interaction, hide_roles: bool, hide_count: bool):
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            return
+        try:
+            view = ConfirmStartView(self.guild_id, self.final_counts, self.all_roles,
+                                    self.npc_count, hide_roles=hide_roles, hide_count=hide_count)
+            await view.launch_game(interaction)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            try:
+                await interaction.followup.send(f"❌ Game start error: {e}", ephemeral=True)
+            except Exception:
+                pass
+        self.stop()
+
+
+class ConfirmStartView(View):
+    def __init__(self, guild_id, final_counts, all_roles, npc_count=0,
+                 hide_roles=False, hide_count=False):
+        super().__init__(timeout=300)
+        self.guild_id     = guild_id
+        self.final_counts = final_counts
+        self.all_roles    = all_roles
+        self.npc_count    = npc_count
+        self.hide_roles   = hide_roles
+        self.hide_count   = hide_count
         start_btn  = Button(label="🚀 Start Game", style=discord.ButtonStyle.green)
         cancel_btn = Button(label="Cancel",         style=discord.ButtonStyle.danger)
         start_btn.callback  = self.on_start
@@ -7834,6 +8286,8 @@ class ConfirmStartView(View):
         self.stop()
 
     async def launch_game(self, interaction: discord.Interaction):
+        hide_roles = getattr(self, 'hide_roles', False)
+        hide_count = getattr(self, 'hide_count', False)
         state     = cached_get_state(interaction.guild_id)
         p_role_id = state.get("participant_role_id")
         p_role    = interaction.guild.get_role(p_role_id) if p_role_id else None
@@ -8124,6 +8578,7 @@ class ConfirmStartView(View):
         for player in players:
             role_name = assignments[player.id]
             role_info = get_role_info(interaction.guild_id, role_name)
+            # Channel name always includes role — player knows their own role
             priv_ch_name = f"🔒{player.display_name}-{role_name}".lower().replace(" ", "-")
             ch_ow = {
                 everyone: discord.PermissionOverwrite(view_channel=False),
@@ -8136,6 +8591,12 @@ class ConfirmStartView(View):
                 ch_ow[spec_role] = read_ow
             ch = await category.create_text_channel(priv_ch_name, overwrites=ch_ow)
             player_channels[player.id] = ch.id
+
+        if hide_roles:
+            # Private channel still gets the real role card — player knows their own role
+            embed    = build_role_card(player, role_name, role_info, font)
+            role_msg = await ch.send(player.mention, embed=embed)
+        else:
             embed    = build_role_card(player, role_name, role_info, font)
             role_msg = await ch.send(player.mention, embed=embed)
             try:
@@ -8474,11 +8935,27 @@ class ConfirmStartView(View):
                         f"⚠️ Failed to auto-create NPC #{_ + 1}: {e}")
         rows = db_get_assignments(interaction.guild_id)
 
-        # Persistent embeds
-        pl_msg  = await player_list_ch.send(embed=build_player_list_embed(interaction.guild, rows, []))
+        # Persistent embeds — respect chaos mode
+        if hide_count:
+            pl_embed = discord.Embed(
+                title       = "👥 Players — Hidden",
+                description = "🌪️ **Chaos Game** — Player count and identities are hidden.\n*The village does not know how many it numbers.*",
+                color       = 0x2C3060)
+            pl_msg = await player_list_ch.send(embed=pl_embed)
+        else:
+            pl_msg = await player_list_ch.send(embed=build_player_list_embed(interaction.guild, rows, []))
+
         all_roles_map = {r["name"]: r for r in self.all_roles} if isinstance(self.all_roles, list) else self.all_roles
-        await post_role_list_embeds(role_list_ch, self.final_counts, all_roles_map)
-        rl_msg  = await role_list_ch.send("📜 *Role descriptions posted above. Who has each role is secret.*")
+        if hide_roles:
+            rl_embed = discord.Embed(
+                title       = "📜 Roles in Play — Hidden",
+                description = "🎭 **Chaos Game** — Roles in play are unknown.\n*What walks among you is yours to discover.*",
+                color       = 0x2C3060)
+            await role_list_ch.send(embed=rl_embed)
+        else:
+            await post_role_list_embeds(role_list_ch, self.final_counts, all_roles_map)
+        rl_msg  = await role_list_ch.send("📜 *Role descriptions posted above. Who has each role is secret.*" if not hide_roles
+                                          else "🎭 *Roles are hidden in this game.*")
         dv_view = DayVoteView(interaction.guild_id)
         dv_msg  = await day_vote_ch.send(embed=build_day_vote_embed(interaction.guild, [], rows), view=dv_view)
 
@@ -8511,7 +8988,9 @@ class ConfirmStartView(View):
             night_bb_done=0,
             day_bb_done=0,
             investigations_done=0,
-            time_lord_triggered=0
+            time_lord_triggered=0,
+            chaos_hide_roles=1 if hide_roles else 0,
+            chaos_hide_count=1 if hide_count else 0
         )
 
         # Timeline embed
@@ -8565,11 +9044,37 @@ class ConfirmStartView(View):
         await mod_log_ch.send(
             embed=discord.Embed(
                 title       = "🌙 Ready to begin Night 1?",
-                description = f"All {len(players)} players have received their roles.\nClick below when you are ready to start the night phase.",
+                description = (
+                    f"All {len(players)} players have received their roles.\n"
+                    f"Click below when you are ready to start the night phase."
+                    + (f"\n\n🎭 **Chaos Mode: Roles Hidden** — Players do not know their roles." if hide_roles and not hide_count else "")
+                    + (f"\n\n👥 **Chaos Mode: Count Hidden** — Players do not know how many are in the game." if hide_count and not hide_roles else "")
+                    + (f"\n\n🌪️ **Full Chaos Mode** — Roles AND player count are hidden." if hide_roles and hide_count else "")
+                ),
                 color       = 0x2C3060
             ),
             view=view
         )
+
+        # Announce chaos mode to village-chat
+        if hide_roles or hide_count:
+            vc_announce = interaction.guild.get_channel(
+                (cached_get_state(interaction.guild_id) or {}).get("village_chat_ch_id") or 0)
+            if vc_announce:
+                chaos_lines = []
+                if hide_roles and hide_count:
+                    chaos_lines.append("🌪️ **Full Chaos Game**")
+                    chaos_lines.append("*You know your own role. You do not know what other roles are in play, or how many stand with you.*")
+                    chaos_lines.append("*Observe. Deduce. Trust nothing.*")
+                elif hide_roles:
+                    chaos_lines.append("🎭 **Chaos Game — Hidden Roster**")
+                    chaos_lines.append("*You know your own role. The roles others are playing are unknown.*")
+                    chaos_lines.append("*The village does not know what it is up against.*")
+                elif hide_count:
+                    chaos_lines.append("👥 **Chaos Game — Player Count Hidden**")
+                    chaos_lines.append("*You know your role. You do not know how many are playing.*")
+                    chaos_lines.append("*The size of the village is yours to discover.*")
+                await vc_announce.send("\n".join(chaos_lines))
 
         # ── Post and pin the mod dashboard ───────────────────────────────
         invalidate_cache(interaction.guild_id)
@@ -8696,7 +9201,16 @@ async def end_game(interaction: discord.Interaction):
         except Exception as e:
             print(f"[end_game] Summary failed: {e}")
 
-        cat = interaction.guild.get_channel(state["category_id"])
+        # ── Full game action history — posted to mod-log before channels are deleted ──
+        try:
+            mod_ch_hist = interaction.guild.get_channel(state.get("mod_log_channel_id") or 0)
+            if mod_ch_hist:
+                await _post_game_action_history(interaction.guild, interaction.guild_id,
+                                                night_num, mod_ch_hist)
+        except Exception as e:
+            print(f"[end_game] Action history failed: {e}")
+
+        cat = interaction.guild.get_channel(state.get("category_id") or 0)
         # Clean up NPC webhooks before deleting channels
         npcs       = db_get_npcs(interaction.guild_id)
         village_ch = interaction.guild.get_channel(state.get("village_chat_ch_id") or 0)
@@ -8708,9 +9222,24 @@ async def end_game(interaction: discord.Interaction):
                         await wh.delete()
             except Exception:
                 pass
-            # Purge all messages in village chat
+            # Purge village chat messages — only bulk-delete messages under 14 days old
+            # to avoid Discord 403 on older messages
             try:
-                await village_ch.purge(limit=None)
+                from datetime import datetime, timezone, timedelta
+                cutoff = datetime.now(timezone.utc) - timedelta(days=13, hours=23)
+                to_delete = []
+                async for msg in village_ch.history(limit=500):
+                    if msg.created_at > cutoff:
+                        to_delete.append(msg)
+                # Discord bulk delete accepts max 100 at a time
+                while to_delete:
+                    batch = to_delete[:100]
+                    to_delete = to_delete[100:]
+                    try:
+                        await village_ch.delete_messages(batch)
+                        await asyncio.sleep(0.5)
+                    except Exception:
+                        pass
             except Exception as e:
                 print(f"Village chat purge error: {e}")
         for npc in npcs:
@@ -8736,6 +9265,17 @@ async def end_game(interaction: discord.Interaction):
         # No separate purge needed
 
         db_clear_state(interaction.guild_id)
+
+        # Cancel any active phase timers so they don't fire on deleted channels
+        t_night = night_timers.pop(interaction.guild_id, None)
+        if t_night: t_night.cancel()
+        t_day = day_vote_timers.pop(interaction.guild_id, None)
+        if t_day: t_day.cancel()
+
+        # Clear in-memory caches for this guild
+        invalidate_cache(interaction.guild_id)
+        _mod_role_cache.pop(interaction.guild_id, None)
+
         await set_bot_status("💤 No active game")
         try:
             await interaction.followup.send("✅ Game ended. All channels deleted.", ephemeral=True)
@@ -9955,7 +10495,7 @@ async def revive_player(interaction: discord.Interaction,
 
     phase = cached_get_state(interaction.guild_id).get("phase", "day").capitalize()
     await log_event(interaction.guild, phase,
-        f"✨ **{player.display_name}** revived — returned as **{new_role}**"
+        f"✨ **{player.display_name}** has been revived and returned to the game."
         + (" (publicly announced)" if public else " (silent)"))
     await post_mod_log(interaction.guild,
         f"✨ **Revive** — {player.mention} returned as {revive_label}"
@@ -10104,9 +10644,18 @@ async def reserve_role_autocomplete(interaction: discord.Interaction, current: s
 @tree.command(name="list_players", description="Show alive and dead players")
 async def list_players(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=False)
-    rows = db_get_assignments(interaction.guild_id)
+    rows  = db_get_assignments(interaction.guild_id)
+    state = cached_get_state(interaction.guild_id) or {}
     if not rows:
         return await interaction.followup.send("No active game.")
+
+    # Chaos mode — count hidden
+    if state.get("chaos_hide_count"):
+        alive = sum(1 for r in rows if r[2] == 1)
+        return await interaction.followup.send(
+            f"👥 **Chaos Game** — player identities are hidden.\n"
+            f"**{alive}** players remain alive.", ephemeral=True)
+
     log = db_get_log(interaction.guild_id)
     await interaction.followup.send(embed=build_player_list_embed(interaction.guild, rows, log))
 
@@ -11320,7 +11869,10 @@ async def _run_elimination(guild, interaction, player, role_name, public, assign
     if role_name == "Elder":
         await handle_elder_hit(guild, guild.id, killed_by_vote=True)
 
-    await _eliminate_player(guild, player.id, "Moderator decision")
+    # Read the actual reason set by the /eliminate command
+    elim_state  = cached_get_state(guild.id) or {}
+    elim_reason = elim_state.get("_pending_elim_reason") or "mod_kill"
+    await _eliminate_player(guild, player.id, elim_reason)
 
     # Village Jokester — gets to kill one voter
     if role_name == "Village Jokester":
@@ -11426,15 +11978,14 @@ async def _run_elimination(guild, interaction, player, role_name, public, assign
     except Exception as e:
         print(f"[gravedigger_notify] {e}")
 
-    # Log the elimination with reason
+    # Log the elimination with the reason passed in
     try:
-        # Try to get reason from calling context (passed via state or default)
-        state_el = cached_get_state(guild.id) or {}
-        elim_reason  = state_el.get("_pending_elim_reason", "unknown")
-        elim_day_num = state_el.get("_pending_elim_day", db_get_night_num(guild.id))
-        db_log_elimination(guild.id, player.id, role_name, elim_reason, elim_day_num)
-        # Clear pending reason
+        state_el     = cached_get_state(guild.id) or {}
+        elim_day_num = state_el.get("_pending_elim_day") or db_get_night_num(guild.id)
+        db_log_elimination(guild.id, player.id, role_name, reason, elim_day_num)
+        # Clear pending state
         db_set_state(guild.id, **{"_pending_elim_reason": None, "_pending_elim_day": None})
+        invalidate_cache(guild.id)
     except Exception:
         pass
 
@@ -14222,6 +14773,10 @@ class TurnResultView(View):
         rows   = db_get_assignments(self.guild_id)
         target = guild.get_member(self.target_id)
 
+        # target may be None if they left the server — use name from self
+        target_display = target.display_name if target else self.target_name
+        target_mention = target.mention if target else f"<@{self.target_id}>"
+
         # ── Build wolf role pool from current game pool only ─────────────
         TURN_EXCLUDE = {"Alpha", "Elite Alpha"}
         last_roles   = db_get_last_roles(self.guild_id)
@@ -14236,7 +14791,7 @@ class TurnResultView(View):
 
         if wolf_pool:
             import random as _random
-            new_role = _random.choice(wolf_pool)
+            new_role  = _random.choice(wolf_pool)
             role_info = get_role_info(self.guild_id, new_role)
         else:
             new_role  = None
@@ -14255,10 +14810,17 @@ class TurnResultView(View):
         # ── Grant wolf den access ─────────────────────────────────────────
         wolf_ch = guild.get_channel(state.get("wolf_channel_id") or 0)
         if wolf_ch and target:
-            await wolf_ch.set_permissions(target, view_channel=True, send_messages=True)
+            try:
+                await wolf_ch.set_permissions(target, view_channel=True, send_messages=True)
+                await wolf_ch.send(fmt(
+                    f"🐺 **{target_display}** has joined the pack — turned by the {self.role_name}!\n"
+                    f"Welcome them to the den."))
+            except Exception as e:
+                print(f"[TurnResult] wolf den access error: {e}")
+        elif wolf_ch and not target:
             await wolf_ch.send(fmt(
-                f"🐺 **{self.target_name}** has joined the pack — turned by the {self.role_name}!\n"
-                f"Welcome them to the den."))
+                f"🐺 **{target_display}** has joined the pack — turned by the {self.role_name}!\n"
+                f"*(Player not found in server — permissions could not be granted. Check manually.)*"))
 
         # ── Update win tracker ────────────────────────────────────────────
         await refresh_win_tracker(guild)
@@ -14277,30 +14839,37 @@ class TurnResultView(View):
                 if new_role:
                     # Rename channel to reflect new role
                     try:
-                        new_ch_name = f"🔒{self.target_name}-{new_role}".lower().replace(" ", "-")[:100]
+                        new_ch_name = f"🔒{target_display}-{new_role}".lower().replace(" ", "-")[:100]
                         await priv_ch.edit(name=new_ch_name)
                     except Exception as e:
                         print(f"[TurnResult] channel rename error: {e}")
 
                     # Send wheel spin animation
                     wheel_lines = "\n".join(f"🎡 {r}" for r in wolf_pool)
-                    spin_msg = await priv_ch.send(fmt(
-                        f"🐺 Something has shifted in the darkness.\n"
-                        f"You are no longer who you were.\n\n"
-                        f"The wheel spins...\n{wheel_lines}"))
-                    await asyncio.sleep(2)
-                    embed = build_role_card(target, new_role, role_info,
-                                           get_guild_font(self.guild_id))
-                    await spin_msg.edit(content=fmt(
-                        f"🐺 The wheel has spoken.\n"
-                        f"You are now: **{new_role}**"))
-                    turn_msg = await priv_ch.send(
-                        f"Welcome to the pack, {target.mention}",
-                        embed=embed)
                     try:
+                        spin_msg = await priv_ch.send(fmt(
+                            f"🐺 Something has shifted in the darkness.\n"
+                            f"You are no longer who you were.\n\n"
+                            f"The wheel spins...\n{wheel_lines}"))
+                        await asyncio.sleep(2)
+                        await spin_msg.edit(content=fmt(
+                            f"🐺 The wheel has spoken.\n"
+                            f"You are now: **{new_role}**"))
+                    except Exception as e:
+                        print(f"[TurnResult] spin message error: {e}")
+
+                    try:
+                        embed    = build_role_card(target, new_role, role_info,
+                                                   get_guild_font(self.guild_id))
+                        turn_msg = await priv_ch.send(
+                            f"Welcome to the pack, {target_mention}",
+                            embed=embed)
                         await turn_msg.pin()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"[TurnResult] role card error: {e}")
+                        await priv_ch.send(fmt(
+                            f"🐺 You have been turned. Your new role: **{new_role}**\n"
+                            f"The mod will send your full role card shortly."))
                 else:
                     await priv_ch.send(fmt(
                         f"🐺 Something has shifted in the darkness.\n"
@@ -14308,26 +14877,26 @@ class TurnResultView(View):
                         f"The mod will assign your new role shortly."))
 
         if new_role:
-            await _safe_edit(interaction,
-                content=(
-                    f"✅ **{self.target_name}** turned — new wolf role assigned.\n"
-                    f"Den access granted. Channel renamed.\n\n"
-                    f"**Updated counts:**\n"
-                    f"🏘️ Village: {village_count}  🐺 Wolves: {wolf_count}  ⚖️ Neutrals: {neutral_count}"))
+            await interaction.followup.send(
+                f"✅ **{target_display}** turned — new wolf role assigned.\n"
+                f"Den access granted. Channel renamed.\n\n"
+                f"**Updated counts:**\n"
+                f"🏘️ Village: {village_count}  🐺 Wolves: {wolf_count}  ⚖️ Neutrals: {neutral_count}",
+                ephemeral=True)
         else:
-            await _safe_edit(interaction,
-                content=(
-                    f"⚠️ **{self.target_name}** turned but no valid wolf roles found in pool.\n"
-                    f"Use `/turn_player` to assign their wolf role manually.\n\n"
-                    f"**Updated counts:**\n"
-                    f"🏘️ Village: {village_count}  🐺 Wolves: {wolf_count}  ⚖️ Neutrals: {neutral_count}"))
+            await interaction.followup.send(
+                f"⚠️ **{target_display}** turned but no valid wolf roles found in pool.\n"
+                f"Use `/turn_player` to assign their wolf role manually.\n\n"
+                f"**Updated counts:**\n"
+                f"🏘️ Village: {village_count}  🐺 Wolves: {wolf_count}  ⚖️ Neutrals: {neutral_count}",
+                ephemeral=True)
 
         # Remind mod that investigations now reflect the turn
         actions_check = db_get_night_actions(self.guild_id, self.night_num)
         has_invest = any(a[1] in ("seer", "medium", "bloodhound") for a in actions_check)
         if has_invest:
             await post_mod_log(interaction.guild,
-                f"⚠️ **Turn confirmed — {self.target_name} is now a wolf in the DB.**\n"
+                f"⚠️ **Turn confirmed — {target_display} is now a wolf in the DB.**\n"
                 f"Seer / Medium / Bloodhound results this night will now correctly show them as wolf.\n"
                 f"**Deliver investigations now if you haven't already.**")
 
@@ -14336,20 +14905,39 @@ class TurnResultView(View):
     async def on_fail(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         db_record_turn(self.guild_id, self.night_num, self.actor_id, self.target_id, "failed")
-        await _safe_edit(interaction,
-            content=f"❌ Turn attempt on **{self.target_name}** failed — no change.")
+        await interaction.followup.send(
+            f"❌ Turn attempt on **{self.target_name}** failed — no change recorded.",
+            ephemeral=True)
         safe_task(update_mod_dashboard(interaction.guild), "dashboard_turn_fail")
 
 
 class AlphaView(BaseNightView):
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
-        sel  = Select(placeholder="👑 Choose a villager to turn", options=self._player_options())
-        skip = Button(label="No Turn This Night", style=discord.ButtonStyle.secondary)
-        sel.callback  = self.on_select
-        skip.callback = self.on_skip
-        self.add_item(sel)
-        self.add_item(skip)
+
+        # Check if Alpha has already used their one turn successfully
+        conn_a = sqlite3.connect(DB_FILE)
+        c_a    = conn_a.cursor()
+        c_a.execute(
+            "SELECT COUNT(*) FROM turn_log WHERE guild_id=? AND actor_id=? AND result='success'",
+            (self.guild_id, self.actor_id))
+        used = c_a.fetchone()[0]
+        conn_a.close()
+
+        if used:
+            # Turn already used — show disabled placeholder only
+            btn = Button(
+                label    = "✅ Turn already used — no further turns available",
+                style    = discord.ButtonStyle.secondary,
+                disabled = True)
+            self.add_item(btn)
+        else:
+            sel  = Select(placeholder="👑 Choose a villager to turn", options=self._player_options())
+            skip = Button(label="No Turn This Night", style=discord.ButtonStyle.secondary)
+            sel.callback  = self.on_select
+            skip.callback = self.on_skip
+            self.add_item(sel)
+            self.add_item(skip)
 
     async def on_select(self, interaction):
         target_id   = int(interaction.data["values"][0])
@@ -14391,12 +14979,29 @@ class AlphaView(BaseNightView):
 class EliteAlphaView(BaseNightView):
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
-        sel  = Select(placeholder="👑⭐ Choose a villager to turn", options=self._player_options())
-        skip = Button(label="No Turn This Night", style=discord.ButtonStyle.secondary)
-        sel.callback  = self.on_select
-        skip.callback = self.on_skip
-        self.add_item(sel)
-        self.add_item(skip)
+
+        # Check how many successful turns Elite Alpha has used (max 2)
+        conn_ea = sqlite3.connect(DB_FILE)
+        c_ea    = conn_ea.cursor()
+        c_ea.execute(
+            "SELECT COUNT(*) FROM turn_log WHERE guild_id=? AND actor_id=? AND result='success'",
+            (self.guild_id, self.actor_id))
+        used = c_ea.fetchone()[0]
+        conn_ea.close()
+
+        if used >= 2:
+            btn = Button(
+                label    = "✅ Both turns used — no further turns available",
+                style    = discord.ButtonStyle.secondary,
+                disabled = True)
+            self.add_item(btn)
+        else:
+            sel  = Select(placeholder="👑⭐ Choose a villager to turn", options=self._player_options())
+            skip = Button(label="No Turn This Night", style=discord.ButtonStyle.secondary)
+            sel.callback  = self.on_select
+            skip.callback = self.on_skip
+            self.add_item(sel)
+            self.add_item(skip)
 
     async def on_select(self, interaction):
         target_id   = int(interaction.data["values"][0])
@@ -16174,7 +16779,177 @@ SEER_CLEAR_LINES = [
     "No wolf here. Which means the wolf is somewhere else. Keep looking.",
 ]
 
-async def resolve_night(guild: discord.Guild, night_num: int):
+async def _post_game_action_history(guild, guild_id: int, total_nights: int, mod_ch):
+    """
+    Post a full game action history to mod-log before channels are deleted.
+    Grouped by night, shows every action, who did it, who it targeted, and result.
+    Split across multiple embeds if needed (Discord 6000 char limit).
+    """
+    # Fetch all data
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute(
+        "SELECT night_num, actor_id, action_type, target_id FROM night_actions "
+        "WHERE guild_id=? ORDER BY night_num, actor_id",
+        (guild_id,))
+    all_actions = c.fetchall()
+    conn.close()
+
+    assignments  = db_get_assignments(guild_id)
+    turn_log     = db_get_turn_log(guild_id)
+    block_log    = db_get_block_log(guild_id)
+    elim_log     = db_get_elimination_log(guild_id)
+    vote_history = db_get_vote_history(guild_id)
+    npcs         = db_get_npcs(guild_id)
+    npc_map      = {n["npc_id"]: n["name"] for n in npcs}
+
+    # Role map for assignments
+    role_map = {r[0]: r[1] for r in assignments}
+
+    def name(pid):
+        if pid is None: return "—"
+        npc = npc_map.get(pid)
+        if npc: return f"🤖 {npc}"
+        m = guild.get_member(pid)
+        return m.display_name if m else str(pid)
+
+    def role(pid):
+        return role_map.get(pid, "?")
+
+    # Action type → readable label
+    ACTION_LABELS = {
+        "seer":             "🔮 Seer investigated",
+        "medium":           "🌀 Medium checked",
+        "doctor":           "💉 Doctor protected",
+        "surgeon":          "🩺 Surgeon protected",
+        "huntsman":         "🏹 Huntsman guarded",
+        "witch_save":       "🧪 Witch saved",
+        "witch_kill":       "☠️ Witch poisoned",
+        "wolf_kill":        "🐺 Den targeted",
+        "wolf_vote":        "🐺 Den voted",
+        "alpha":            "👑 Alpha attempted turn on",
+        "elite_alpha":      "👑⭐ Elite Alpha attempted turn on",
+        "alpha_skip":       "👑 Alpha skipped turn",
+        "elite_alpha_skip": "👑⭐ Elite Alpha skipped turn",
+        "wolf_pup":         "🐾 Wolf Pup blocked",
+        "bloodhound":       "🦴 Bloodhound scanned",
+        "bloodletter":      "🩸 Bloodletter marked",
+        "cupid_bind":       "💘 Cupid bound",
+        "cupid_skip":       "💘 Cupid skipped",
+        "hermit":           "🏚️ Hermit hid",
+        "governor_pardon":  "🎖️ Governor pardoned",
+        "agitator_frenzy":  "⚡ Agitator declared frenzy",
+        "werekitten":       "🐱 Werekitten killed",
+        "white_wolf":       "🤍 White Wolf targeted",
+        "wraith_mark":      "👻 Wraith marked",
+        "wraith_kill":      "👻 Wraith Kill Command",
+        "shadow_wolf":      "🌑 Shadow Wolf targeted",
+        "prostitute":       "💃 Prostitute blocked",
+        "clone":            "🪞 Clone copied",
+        "shapeshifter":     "🌀 Shapeshifter became",
+        "dire_wolf":        "🐺💕 Dire Wolf bonded with",
+        "echo_stalker":     "👁️ Echo-Stalker haunted",
+        "_pass":            "💤 Passed (no action)",
+    }
+
+    # Group actions by night
+    actions_by_night = {}
+    for night_num, actor_id, action_type, target_id in all_actions:
+        actions_by_night.setdefault(night_num, []).append((actor_id, action_type, target_id))
+
+    # Build turn results lookup: (night_num, actor_id) -> result
+    turn_results = {(t[0], t[1]): t[3] for t in turn_log}
+
+    # Build block lookup: night_num -> [(blocker_id, target_id)]
+    blocks_by_night = {}
+    for night_num, blocker_id, target_id in block_log:
+        blocks_by_night.setdefault(night_num, []).append((blocker_id, target_id))
+
+    # Header embed
+    header = discord.Embed(
+        title       = "📜 Full Game Action History",
+        description = f"Every action taken across {total_nights} nights. Mod eyes only.",
+        color       = 0x2C3060
+    )
+    header.set_footer(text=f"{guild.name} · {len(assignments)} players")
+    await mod_ch.send(embed=header)
+
+    # One embed per night
+    for night_num in range(1, total_nights + 1):
+        lines = []
+
+        # Night actions
+        for actor_id, action_type, target_id in actions_by_night.get(night_num, []):
+            label    = ACTION_LABELS.get(action_type, f"[{action_type}]")
+            actor_nm = f"**{name(actor_id)}** ({role(actor_id)})"
+            target_nm = f"**{name(target_id)}**" if target_id else ""
+
+            # Add turn result if applicable
+            result_tag = ""
+            if action_type in ("alpha", "elite_alpha"):
+                res = turn_results.get((night_num, actor_id))
+                if res:
+                    result_tag = f" → *{res}*"
+
+            lines.append(f"{label} {actor_nm} → {target_nm}{result_tag}".strip(" →"))
+
+        # Blocks
+        for blocker_id, blocked_id in blocks_by_night.get(night_num, []):
+            lines.append(f"🚫 **{name(blocker_id)}** ({role(blocker_id)}) blocked **{name(blocked_id)}**")
+
+        # Eliminations this night/day
+        night_elims = [e for e in elim_log if e[4] == night_num]
+        for pid, role_nm, reason, elim_type, _, elim_at in night_elims:
+            icon = "☀️" if elim_type == "vote" else "🌙"
+            lines.append(f"{icon} **{name(pid)}** ({role_nm}) eliminated — *{reason}*")
+
+        # Day votes summary for this day number
+        day_votes = [v for v in vote_history if v[0] == night_num and v[3] in ("vote", "change", "abstain")]
+        if day_votes:
+            # Final votes only (last entry per voter)
+            final = {}
+            for day_num, voter_id, target_id, action, *_ in day_votes:
+                final[voter_id] = (target_id, action)
+            vote_lines = []
+            for voter_id, (target_id, action) in final.items():
+                changed = " *(changed)*" if action == "change" else ""
+                vote_lines.append(f"  🗳️ {name(voter_id)} → {name(target_id)}{changed}")
+            if vote_lines:
+                lines.append(f"**Day {night_num} Votes:**")
+                lines.extend(vote_lines)
+
+        if not lines:
+            lines.append("*No actions recorded.*")
+
+        embed = discord.Embed(
+            title = f"🌙 Night {night_num}",
+            description = "\n".join(lines[:40]),  # cap at 40 lines per embed
+            color = 0x1a1a2e
+        )
+        await mod_ch.send(embed=embed)
+        await asyncio.sleep(0.3)  # avoid rate limits
+
+    # Eliminations summary
+    if elim_log:
+        elim_lines = []
+        for pid, role_nm, reason, elim_type, day_or_night, _ in elim_log:
+            icon = "☀️" if elim_type == "vote" else "🌙"
+            phase = f"Day {day_or_night}" if elim_type == "vote" else f"Night {day_or_night}"
+            elim_lines.append(f"{icon} **{name(pid)}** ({role_nm}) — {phase} — *{reason}*")
+
+        elim_embed = discord.Embed(
+            title       = "💀 All Eliminations",
+            description = "\n".join(elim_lines),
+            color       = 0x8B0000
+        )
+        await mod_ch.send(embed=elim_embed)
+
+
+async def _post_game_action_history_stub():
+    pass  # placeholder to keep linter happy
+
+
+
     """Mark phase as day, clear bond, notify mod — mod handles all resolution manually."""
     guild_id = guild.id
 
@@ -18263,6 +19038,329 @@ def _get_role_atmosphere_hint(role_name: str) -> str:
     return hints.get(role_name, "someone whose role in Whisperfall was never fully understood")
 
 
+@tree.command(name="bb_templates", description="Browse Blood Board templates and role-specific hint boards")
+@is_mod()
+async def bb_templates_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    db_seed_bb_templates(interaction.guild_id)
+
+    embed = discord.Embed(
+        title       = "📋 Blood Board Templates",
+        description = "Choose what you need:",
+        color       = 0x8B0000
+    )
+
+    view = BBTemplateModeView(interaction.guild_id)
+    embed.add_field(
+        name  = "🎭 Role Hints",
+        value = "Hint-based boards for specific roles in the **current game** — killed, voted out, ability used, investigation results.",
+        inline=False
+    )
+    embed.add_field(
+        name  = "📋 General Templates",
+        value = "Saved templates for quiet nights, game endings, missed votes, and more.",
+        inline=False
+    )
+    await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+
+class BBTemplateModeView(View):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=180)
+        self.guild_id = guild_id
+
+        role_btn    = Button(label="🎭 Role Hints",         style=discord.ButtonStyle.primary)
+        general_btn = Button(label="📋 General Templates",  style=discord.ButtonStyle.secondary)
+        role_btn.callback    = self.on_role_hints
+        general_btn.callback = self.on_general
+        self.add_item(role_btn)
+        self.add_item(general_btn)
+
+    async def on_role_hints(self, interaction: discord.Interaction):
+        hints = get_bb_hints_for_game(self.guild_id)
+        if not hints:
+            return await interaction.response.send_message(
+                "No roles found for the current game.", ephemeral=True)
+
+        # Event type selector first
+        event_opts = [
+            discord.SelectOption(label="🌙 Killed overnight",          value="killed"),
+            discord.SelectOption(label="☀️ Voted out",                  value="voted_out"),
+            discord.SelectOption(label="✨ Used their ability",          value="ability"),
+            discord.SelectOption(label="✅ Investigation — clean result", value="investigation_good"),
+            discord.SelectOption(label="❌ Investigation — bad result",   value="investigation_bad"),
+            discord.SelectOption(label="🐺 Wolf kill (wolf used ability)", value="ability"),
+            discord.SelectOption(label="🎭 Special ability variant",     value="ability_kill"),
+        ]
+        view = BBEventSelectView(self.guild_id, hints)
+        await interaction.response.send_message(
+            "**What happened?** Select the event type:", view=view, ephemeral=True)
+
+    async def on_general(self, interaction: discord.Interaction):
+        templates = db_get_bb_templates(self.guild_id)
+        if not templates:
+            return await interaction.response.send_message("No templates saved.", ephemeral=True)
+
+        by_cat = {}
+        for name, cat, body, tags in templates:
+            by_cat.setdefault(cat, []).append((name, body, tags))
+
+        view = BBTemplateView(self.guild_id, by_cat)
+        embed = discord.Embed(
+            title       = "📋 General Templates",
+            description = "Select a category to browse:",
+            color       = 0x8B0000
+        )
+        for cat, items in sorted(by_cat.items()):
+            embed.add_field(
+                name  = f"{cat.title()} ({len(items)})",
+                value = ", ".join(f"`{n}`" for n, _, _ in items),
+                inline= False
+            )
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class BBEventSelectView(View):
+    """Step 1 of role hints flow — select what happened."""
+    def __init__(self, guild_id: int, hints: dict):
+        super().__init__(timeout=180)
+        self.guild_id = guild_id
+        self.hints    = hints
+
+        opts = [
+            discord.SelectOption(label="🌙 Killed overnight",             value="killed"),
+            discord.SelectOption(label="☀️ Voted out by the village",     value="voted_out"),
+            discord.SelectOption(label="✨ Used their ability",            value="ability"),
+            discord.SelectOption(label="✅ Investigation — clean result",  value="investigation_good"),
+            discord.SelectOption(label="❌ Investigation — bad result",    value="investigation_bad"),
+            discord.SelectOption(label="🎭 Ability variant (save/mark/kill/fail)", value="ability_variant"),
+        ]
+        sel = Select(placeholder="What happened this phase?", options=opts)
+        sel.callback = self.on_event
+        self.add_item(sel)
+
+    async def on_event(self, interaction: discord.Interaction):
+        event = interaction.data["values"][0]
+
+        # Handle variant — let user pick specific variant
+        if event == "ability_variant":
+            variant_opts = [
+                discord.SelectOption(label="💉 Ability save (Doctor/Surgeon/Witch saved someone)",   value="ability_save"),
+                discord.SelectOption(label="☠️ Ability kill (Witch poisoned/Shadow Wolf killed)",    value="ability_kill"),
+                discord.SelectOption(label="🏹 Guardian kill (Huntsman killed attacker)",            value="ability_kill"),
+                discord.SelectOption(label="👑 Alpha turn — success",                                value="ability"),
+                discord.SelectOption(label="👑 Alpha turn — failed/blocked",                         value="ability_fail"),
+                discord.SelectOption(label="👻 Wraith marked a player",                              value="ability_mark"),
+                discord.SelectOption(label="👻 Wraith Kill Command fired",                           value="ability_kill"),
+            ]
+            view = BBVariantSelectView(self.guild_id, self.hints)
+            await interaction.response.send_message(
+                "Select the specific ability variant:", view=view, ephemeral=True)
+            return
+
+        # Filter roles that have this event type
+        matching_roles = [(role, role_hints[event])
+                          for role, role_hints in self.hints.items()
+                          if event in role_hints]
+
+        if not matching_roles:
+            return await interaction.response.send_message(
+                f"No role hints available for **{event}** in the current game.", ephemeral=True)
+
+        view = BBRoleSelectView(self.guild_id, matching_roles, event)
+        await interaction.response.send_message(
+            f"Which role was involved?", view=view, ephemeral=True)
+
+
+class BBVariantSelectView(View):
+    """For ability variants — pick specific sub-event then role."""
+    def __init__(self, guild_id: int, hints: dict):
+        super().__init__(timeout=180)
+        self.guild_id = guild_id
+        self.hints    = hints
+
+        opts = [
+            discord.SelectOption(label="ability_save  — saved someone",          value="ability_save"),
+            discord.SelectOption(label="ability_kill  — killed via ability",      value="ability_kill"),
+            discord.SelectOption(label="ability_fail  — attempt failed",          value="ability_fail"),
+            discord.SelectOption(label="ability_mark  — marked a player (Wraith)",value="ability_mark"),
+        ]
+        sel = Select(placeholder="Which variant?", options=opts)
+        sel.callback = self.on_variant
+        self.add_item(sel)
+
+    async def on_variant(self, interaction: discord.Interaction):
+        event = interaction.data["values"][0]
+        matching = [(role, rh[event]) for role, rh in self.hints.items() if event in rh]
+        if not matching:
+            return await interaction.response.send_message(
+                f"No hints for `{event}` in current game.", ephemeral=True)
+        view = BBRoleSelectView(self.guild_id, matching, event)
+        await interaction.response.send_message("Which role was involved?", view=view, ephemeral=True)
+
+
+class BBRoleSelectView(View):
+    """Step 2 of role hints flow — select which role."""
+    def __init__(self, guild_id: int, role_hints: list, event: str):
+        super().__init__(timeout=180)
+        self.guild_id   = guild_id
+        self.role_hints = {role: body for role, body in role_hints}
+        self.event      = event
+
+        opts = [discord.SelectOption(label=role, value=role)
+                for role, _ in role_hints[:25]]
+        sel = Select(placeholder="Which role?", options=opts)
+        sel.callback = self.on_role
+        self.add_item(sel)
+
+    async def on_role(self, interaction: discord.Interaction):
+        role = interaction.data["values"][0]
+        body = self.role_hints.get(role, "")
+        view = BBTemplateActionView(interaction.guild_id, f"{role} — {self.event}", body)
+        embed = discord.Embed(
+            title       = f"🎭 {role} — {self.event.replace('_', ' ').title()}",
+            description = body,
+            color       = 0x8B0000
+        )
+        embed.set_footer(text="Post to mod-log for editing, or copy the raw text")
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+@tree.command(name="bb_save_template", description="Save a custom Blood Board template")
+@is_mod()
+@app_commands.describe(
+    name     = "Template name (e.g. 'my-quiet-night')",
+    category = "Category: night / day / end / general",
+    body     = "The template body text. Use {name}, {name2}, {alive} as placeholders.",
+    tags     = "Optional tags for searching (e.g. 'death quiet wolf')"
+)
+async def bb_save_template_cmd(interaction: discord.Interaction,
+                                name: str, category: str, body: str, tags: str = ""):
+    category = category.lower().strip()
+    if category not in ("night", "day", "end", "general"):
+        return await interaction.response.send_message(
+            "❌ Category must be one of: `night`, `day`, `end`, `general`", ephemeral=True)
+    db_save_bb_template(interaction.guild_id, name, category, body, tags)
+    await interaction.response.send_message(
+        f"✅ Template **{name}** saved under **{category}**.", ephemeral=True)
+
+
+@tree.command(name="bb_delete_template", description="Delete a Blood Board template")
+@is_mod()
+@app_commands.describe(name="Name of the template to delete")
+async def bb_delete_template_cmd(interaction: discord.Interaction, name: str):
+    row = db_get_bb_template(interaction.guild_id, name)
+    if not row:
+        return await interaction.response.send_message(
+            f"❌ Template `{name}` not found.", ephemeral=True)
+    db_delete_bb_template(interaction.guild_id, name)
+    await interaction.response.send_message(
+        f"🗑️ Template **{name}** deleted.", ephemeral=True)
+
+
+@bb_delete_template_cmd.autocomplete("name")
+async def bb_delete_autocomplete(interaction: discord.Interaction, current: str):
+    templates = db_get_bb_templates(interaction.guild_id)
+    return [app_commands.Choice(name=n, value=n)
+            for n, _, _, _ in templates if current.lower() in n.lower()][:25]
+
+
+class BBTemplateView(View):
+    """Browse templates by category, preview, copy text, or post directly to mod-log."""
+    def __init__(self, guild_id: int, by_cat: dict):
+        super().__init__(timeout=180)
+        self.guild_id = guild_id
+        self.by_cat   = by_cat
+
+        # Category selector
+        cat_opts = [discord.SelectOption(label=cat.title(), value=cat,
+                                          description=f"{len(items)} template(s)")
+                    for cat, items in sorted(by_cat.items())]
+        cat_sel = Select(placeholder="Browse by category...", options=cat_opts[:25])
+        cat_sel.callback = self.on_cat
+        self.add_item(cat_sel)
+
+    async def on_cat(self, interaction: discord.Interaction):
+        cat       = interaction.data["values"][0]
+        templates = self.by_cat.get(cat, [])
+        if not templates:
+            return await interaction.response.send_message("No templates in this category.", ephemeral=True)
+
+        opts = [discord.SelectOption(label=name, value=name,
+                                      description=(body[:50] + "...") if len(body) > 50 else body)
+                for name, body, tags in templates[:25]]
+        view = BBTemplatePickView(self.guild_id, templates, cat)
+        await interaction.response.send_message(
+            f"**{cat.title()} templates** — select one to preview:",
+            view=view, ephemeral=True)
+
+
+class BBTemplatePickView(View):
+    def __init__(self, guild_id: int, templates: list, category: str):
+        super().__init__(timeout=180)
+        self.guild_id  = guild_id
+        self.templates = {name: body for name, body, tags in templates}
+
+        opts = [discord.SelectOption(label=name, value=name)
+                for name, body, tags in templates[:25]]
+        sel = Select(placeholder="Choose a template...", options=opts)
+        sel.callback = self.on_select
+        self.add_item(sel)
+
+    async def on_select(self, interaction: discord.Interaction):
+        name = interaction.data["values"][0]
+        body = self.templates.get(name, "")
+        view = BBTemplateActionView(self.guild_id, name, body)
+        embed = discord.Embed(
+            title       = f"📋 {name}",
+            description = body,
+            color       = 0x8B0000
+        )
+        embed.set_footer(text="Use the buttons below to post or copy this template")
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class BBTemplateActionView(View):
+    def __init__(self, guild_id: int, name: str, body: str):
+        super().__init__(timeout=120)
+        self.guild_id = guild_id
+        self.name     = name
+        self.body     = body
+
+        post_btn = Button(label="📤 Post to Mod-Log for Editing", style=discord.ButtonStyle.green)
+        copy_btn = Button(label="📋 Copy Text", style=discord.ButtonStyle.secondary)
+        post_btn.callback = self.on_post
+        copy_btn.callback = self.on_copy
+        self.add_item(post_btn)
+        self.add_item(copy_btn)
+
+    async def on_copy(self, interaction: discord.Interaction):
+        # Send the raw text so mod can copy/paste and edit
+        await interaction.response.send_message(
+            f"```\n{self.body[:1900]}\n```",
+            ephemeral=True)
+
+    async def on_post(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        state   = cached_get_state(interaction.guild_id) or {}
+        mod_ch  = interaction.guild.get_channel(state.get("mod_log_channel_id") or 0)
+        if not mod_ch:
+            return await interaction.followup.send(
+                "❌ Mod-log channel not found.", ephemeral=True)
+
+        embed = discord.Embed(
+            title       = f"📋 BB Template: {self.name}",
+            description = self.body,
+            color       = 0x8B0000
+        )
+        embed.set_footer(text="Edit this text, then use /bloodboard or /dayboard to generate the final post.")
+        await mod_ch.send(
+            f"📋 **Template loaded: `{self.name}`** — edit and use as your blood board draft:",
+            embed=embed)
+        await interaction.followup.send(
+            f"✅ Template **{self.name}** posted to mod-log for editing.", ephemeral=True)
+
+
 @tree.command(name="bloodboard", description="Generate the nightly Blood Board narrative for mod approval")
 @is_mod()
 async def bloodboard(interaction: discord.Interaction):
@@ -19064,7 +20162,7 @@ async def message_count_cmd(interaction: discord.Interaction):
     )
     if dead_lines:
         embed.add_field(name="☠️ Eliminated", value="\n".join(dead_lines), inline=False)
-    embed.set_footer(text="Counts village-chat messages during day phase only")
+    embed.set_footer(text="Counts village-chat messages from alive players — day and night phases")
     await interaction.followup.send(embed=embed, ephemeral=True)
 
 
