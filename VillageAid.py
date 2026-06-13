@@ -16949,7 +16949,7 @@ async def _post_game_action_history_stub():
     pass  # placeholder to keep linter happy
 
 
-
+async def resolve_night(guild: discord.Guild, night_num: int):
     """Mark phase as day, clear bond, notify mod — mod handles all resolution manually."""
     guild_id = guild.id
 
