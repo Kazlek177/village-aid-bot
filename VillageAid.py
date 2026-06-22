@@ -225,17 +225,22 @@ def init_db():
 
     # Vote history — every day vote cast across all days
     c.execute('''CREATE TABLE IF NOT EXISTS vote_history (
-                    guild_id   INTEGER,
-                    entry_id   INTEGER,
-                    day_num    INTEGER,
-                    voter_id   INTEGER,
-                    target_id  INTEGER,
-                    action     TEXT DEFAULT 'vote',
-                    voted_at   INTEGER DEFAULT 0,
+                    guild_id          INTEGER,
+                    entry_id          INTEGER,
+                    day_num           INTEGER,
+                    voter_id          INTEGER,
+                    target_id         INTEGER,
+                    action            TEXT DEFAULT 'vote',
+                    voted_at          INTEGER DEFAULT 0,
+                    vote_change_count INTEGER DEFAULT 0,
                     PRIMARY KEY (guild_id, entry_id)
                  )''')
     try:
         c.execute("ALTER TABLE vote_history ADD COLUMN voted_at INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        c.execute("ALTER TABLE vote_history ADD COLUMN vote_change_count INTEGER DEFAULT 0")
     except Exception:
         pass
     try:
@@ -4064,28 +4069,9 @@ async def refresh_wolf_vote(guild, night_num):
     wolf_votes    = db_get_wolf_votes(guild.id, night_num)
     embed = build_wolf_vote_embed(guild, wolf_votes, alive_players, wolf_ids, night_num,
                                   den_channel=ch)
-    # Build a fresh view then patch options with real names + alive/dead status
+    # Build a fresh view with real names from guild cache
     view = WolfVoteView(guild.id, night_num)
-    if hasattr(view, "_sel"):
-        patched = []
-        non_wolf = [r for r in rows if get_team(guild.id, r[1]) != "wolf"]
-        for pid, role_name, is_alive, _ in non_wolf[:25]:
-            m = guild.get_member(pid)
-            name = m.display_name if m else f"Player {pid}"
-            if is_alive:
-                patched.append(discord.SelectOption(
-                    label=f"✅ {name}",
-                    value=str(pid),
-                    description="Alive — valid kill target"
-                ))
-            else:
-                patched.append(discord.SelectOption(
-                    label=f"💀 {name} (dead)",
-                    value=f"dead_{pid}",
-                    description="Already eliminated — cannot be targeted"
-                ))
-        if patched:
-            view._sel.options = patched
+    view._build(guild.id, guild=guild)  # rebuild with guild for real display names
     try:
         msg = await ch.fetch_message(mid)
         await msg.edit(embed=embed, view=view)
@@ -4171,7 +4157,7 @@ def build_dashboard_embed(guild_id: int, guild=None) -> discord.Embed:
     pend_turns       = pending_turns()
     turn_results     = turn_results_this_night()
     turn_confirmed   = has_turn_attempt and not pend_turns and len(turn_results) > 0
-    turn_successful  = any(r[2] == "successful" for r in turn_results)
+    turn_successful  = any(r[2] == "success" for r in turn_results)
 
     # ── Deaths applied? (check elimination_log for this night) ────────────
     conn_el = sqlite3.connect(DB_FILE)
@@ -6926,26 +6912,8 @@ async def _run_start_night(guild, guild_id, night_num, duration, state):
     # Wolf vote — posted in wolf den since wolf-vote channel no longer exists
     wolf_den_ch = guild.get_channel(state.get("wolf_channel_id") or 0)
     if wolf_den_ch and wolf_ids:
-        view     = WolfVoteView(guild_id, night_num)
-        if hasattr(view, "_sel"):
-            db_rows    = db_get_assignments(guild_id)
-            non_wolf   = [r for r in db_rows if get_team(guild_id, r[1]) != "wolf"]
-            npcs_patch = db_get_npcs(guild_id)
-            npc_map_p  = {n["npc_id"]: n["name"] for n in npcs_patch}
-            patched    = []
-            for pid, role_name, is_alive, _ in non_wolf[:25]:
-                m    = guild.get_member(pid)
-                name = npc_map_p.get(pid) or (m.display_name if m else f"Player {pid}")
-                if is_alive:
-                    patched.append(discord.SelectOption(
-                        label=f"✅ {name}"[:100], value=str(pid),
-                        description="🤖 NPC" if pid in npc_map_p else "Alive"))
-                else:
-                    patched.append(discord.SelectOption(
-                        label=f"💀 {name} (dead)"[:100], value=f"dead_{pid}",
-                        description="Already eliminated"))
-            if patched:
-                view._sel.options = patched
+        view = WolfVoteView(guild_id, night_num)
+        view._build(guild_id, guild=guild)  # rebuild with guild for real display names
         wolf_votes = db_get_wolf_votes(guild_id, night_num)
         embed      = build_wolf_vote_embed(guild, wolf_votes, alive_players, wolf_ids, night_num,
                                            den_channel=wolf_den_ch)
@@ -8592,11 +8560,7 @@ class ConfirmStartView(View):
             ch = await category.create_text_channel(priv_ch_name, overwrites=ch_ow)
             player_channels[player.id] = ch.id
 
-        if hide_roles:
-            # Private channel still gets the real role card — player knows their own role
-            embed    = build_role_card(player, role_name, role_info, font)
-            role_msg = await ch.send(player.mention, embed=embed)
-        else:
+            # Send role card — player always sees their own role
             embed    = build_role_card(player, role_name, role_info, font)
             role_msg = await ch.send(player.mention, embed=embed)
             try:
@@ -11707,11 +11671,8 @@ class WolfVoteView(View):
         self.night_num = night_num
         self._build(guild_id)
 
-    def _build(self, guild_id):
+    def _build(self, guild_id, guild=None):
         self.clear_items()
-        # Note: guild is not available at __init__ time via guild_id alone,
-        # so options are patched with real names in refresh_wolf_vote.
-        # We use placeholder options here that get replaced immediately.
         rows = db_get_assignments(guild_id)
         non_wolf = [r for r in rows if get_team(guild_id, r[1]) != "wolf"]
         if not non_wolf:
@@ -11719,17 +11680,24 @@ class WolfVoteView(View):
                          style=discord.ButtonStyle.secondary)
             self.add_item(btn)
             return
-        # Build options with real names — include NPCs
-        npcs_wv  = db_get_npcs(guild_id)
+        npcs_wv    = db_get_npcs(guild_id)
         npc_map_wv = {n["npc_id"]: n["name"] for n in npcs_wv}
         options = []
         for pid, role_name, is_alive, _ in non_wolf[:25]:
-            name = npc_map_wv.get(pid, f"Player {pid}")
+            # Try to get real name from guild cache if guild is available
+            npc_name = npc_map_wv.get(pid)
+            if npc_name:
+                name = npc_name
+            elif guild:
+                m    = guild.get_member(pid)
+                name = m.display_name if m else f"Player {pid}"
+            else:
+                name = f"Player {pid}"
             if is_alive:
                 options.append(discord.SelectOption(
                     label=f"✅ {name}"[:100],
                     value=str(pid),
-                    description="🤖 NPC" if pid in npc_map_wv else "Alive"
+                    description="🤖 NPC" if npc_name else "Alive"
                 ))
             else:
                 options.append(discord.SelectOption(
@@ -11767,6 +11735,11 @@ class WolfVoteView(View):
         if not target_row:
             return await interaction.response.send_message(
                 "❌ That player is no longer alive. Please choose again.", ephemeral=True)
+
+        # Defer immediately — refresh_wolf_vote, post_mod_log, and den lock messages
+        # are all network calls that can exceed the 3-second interaction window
+        await interaction.response.defer(ephemeral=True)
+
         db_set_wolf_vote(interaction.guild_id, self.night_num, interaction.user.id, target_id)
         target = interaction.guild.get_member(target_id)
         tname  = target.display_name if target else str(target_id)
@@ -11784,27 +11757,37 @@ class WolfVoteView(View):
         top_target, top_voters = max(vote_tally.items(), key=lambda x: len(x[1])) if vote_tally else (None, [])
 
         # Post to mod-log
-        await post_mod_log(interaction.guild,
-            f"🐺 **Wolf Vote** — Night {self.night_num}\n"
-            f"**{voter.display_name if voter else interaction.user.id}** voted to kill **{tname}**\n"
-            f"*Pack vote tally: {len(wolf_votes)}/{len(wolf_alive)} vote(s) cast.*")
+        try:
+            await post_mod_log(interaction.guild,
+                f"🐺 **Wolf Vote** — Night {self.night_num}\n"
+                f"**{voter.display_name if voter else interaction.user.id}** voted to kill **{tname}**\n"
+                f"*Pack vote tally: {len(wolf_votes)}/{len(wolf_alive)} vote(s) cast.*")
+        except Exception as e:
+            print(f"[wolf_vote] mod-log post failed: {e}")
 
         # If all wolves agree on one target — post "Target Locked" to den
         if top_target and len(top_voters) == len(wolf_alive) and len(wolf_alive) > 0:
-            state_wv = cached_get_state(interaction.guild_id)
-            den_ch   = interaction.guild.get_channel(state_wv.get("wolf_channel_id") or 0)
-            locked_m = interaction.guild.get_member(top_target)
-            locked_name = locked_m.display_name if locked_m else str(top_target)
-            if den_ch:
-                lock_lines = [
-                    f"🔒 **Target locked: {locked_name}**\n*The pack is in agreement. The hunt begins.*",
-                    f"🔒 **Target locked: {locked_name}**\n*All wolves have spoken. No further deliberation needed.*",
-                    f"🔒 **Target locked: {locked_name}**\n*The decision is made. Whisperfall won't know what's coming.*",
-                ]
-                await den_ch.send(random.choice(lock_lines))
+            try:
+                state_wv = cached_get_state(interaction.guild_id)
+                den_ch   = interaction.guild.get_channel(state_wv.get("wolf_channel_id") or 0)
+                locked_m = interaction.guild.get_member(top_target)
+                locked_name = locked_m.display_name if locked_m else str(top_target)
+                if den_ch:
+                    lock_lines = [
+                        f"🔒 **Target locked: {locked_name}**\n*The pack is in agreement. The hunt begins.*",
+                        f"🔒 **Target locked: {locked_name}**\n*All wolves have spoken. No further deliberation needed.*",
+                        f"🔒 **Target locked: {locked_name}**\n*The decision is made. Whisperfall won't know what's coming.*",
+                    ]
+                    await den_ch.send(random.choice(lock_lines))
+            except Exception as e:
+                print(f"[wolf_vote] den lock message failed: {e}")
 
-        await refresh_wolf_vote(interaction.guild, self.night_num)
-        await interaction.response.send_message(
+        try:
+            await refresh_wolf_vote(interaction.guild, self.night_num)
+        except Exception as e:
+            print(f"[wolf_vote] refresh failed: {e}")
+
+        await interaction.followup.send(
             f"✅ Voted to kill **{tname}**. You can change your vote before night ends.",
             ephemeral=True)
 
@@ -12652,7 +12635,7 @@ async def assign_victors(interaction: discord.Interaction, winning_team: str):
     conn_t = sqlite3.connect(DB_FILE)
     c_t    = conn_t.cursor()
     c_t.execute(
-        "SELECT DISTINCT target_id FROM turn_log WHERE guild_id=? AND result='successful'",
+        "SELECT DISTINCT target_id FROM turn_log WHERE guild_id=? AND result='success'",
         (guild_id,))
     turned_pids = {r[0] for r in c_t.fetchall()}
     conn_t.close()
@@ -12853,34 +12836,13 @@ async def assign_victors(interaction: discord.Interaction, winning_team: str):
             f"🔍 **Most Suspected:** {pid_to_name.get(most_suspected_id, str(most_suspected_id))} "
             f"— received {times_nominated[most_suspected_id]} votes across all days")
 
-    # — Claude-generated MVP narrative
-    if mvp_lines:
-        mvp_context = "\n".join(f"• {l}" for l in mvp_lines)
-        mvp_prompt = (
-            f"Game over. {win_label}.\n\n"
-            f"Here are the standout moments and players from this game:\n{mvp_context}\n\n"
-            f"Write a punchy, exciting MVP callout — 3-5 sentences max. "
-            f"Highlight the most impactful moments. Name the players. "
-            f"Make it feel like a sports highlight reel crossed with a thriller recap. "
-            f"End on the winning team's moment. No emojis in the text — the data already has them."
-        )
-        mvp_system = (
-            "You are the announcer for Whisperfall — writing the post-game MVP callout. "
-            "Be dramatic but precise. Every sentence should land. No filler."
-        )
-        mvp_narrative = await _claude(mvp_prompt, mvp_system, max_tokens=300)
-        if not mvp_narrative:
-            mvp_narrative = "\n".join(mvp_lines)
-    else:
-        mvp_narrative = "No standout moments recorded — the game data is sparse."
 
     mvp_embed = discord.Embed(
         title       = "🏅 Game Highlights",
-        description = mvp_narrative,
+        description = "*Use `/game_recap` to generate the full narrative recap.*",
         color       = team_color.get(winning_team, 0x5865F2)
     )
     for line in mvp_lines:
-        # Each stat as a compact field
         parts = line.split(":", 1)
         if len(parts) == 2:
             mvp_embed.add_field(name=parts[0].strip(), value=parts[1].strip(), inline=False)
@@ -17201,12 +17163,12 @@ remind_timers = {}
 @is_mod()
 @app_commands.describe(
     player="The player targeted for turning",
-    result="successful / blocked / sheriff_death / alpha_death"
+    result="success / blocked / sheriff_death / alpha_death"
 )
 async def log_turn_result(interaction: discord.Interaction, player: discord.Member, result: str):
     if not game_active(interaction.guild_id):
         return await interaction.response.send_message("No active game.", ephemeral=True)
-    valid = {"successful", "blocked", "sheriff_death", "alpha_death"}
+    valid = {"success", "blocked", "sheriff_death", "alpha_death"}
     result = result.lower().strip()
     if result not in valid:
         return await interaction.response.send_message(
@@ -17232,7 +17194,7 @@ async def log_turn_result(interaction: discord.Interaction, player: discord.Memb
         f"**Target:** {player.display_name} | **Outcome:** {result_pretty}")
 
     # If turn was successful, warn mod that investigations must be delivered AFTER this
-    if result == "successful":
+    if result == "success":
         actions = db_get_night_actions(interaction.guild_id, night_num)
         has_invest = any(a[1] in ("seer", "medium", "bloodhound") for a in actions)
         if has_invest:
