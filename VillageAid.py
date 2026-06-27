@@ -3468,7 +3468,8 @@ async def post_day_transition(guild, night_num: int, duration_secs: int, deaths:
                 break
 
     # Start ambient message loop for the day phase
-    safe_task(_ambient_loop(guild, guild.id), "ambient")
+    # Ambient loop disabled — was causing Discord rate limit issues
+    # safe_task(_ambient_loop(guild, guild.id), "ambient")
 
     # NPC morning reactions
     safe_task(_npc_morning_reactions(guild, guild.id, night_num, deaths or []), "npc_morning")
