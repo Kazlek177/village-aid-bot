@@ -16,7 +16,7 @@ intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 
-client = discord.Client(intents=intents)
+client = discord.Client(intents=intents, max_ratelimit_retry=5)
 tree = app_commands.CommandTree(client)
 
 
@@ -25,6 +25,14 @@ def safe_task(coro, name="task"):
     async def _wrapper():
         try:
             await coro
+        except discord.errors.HTTPException as e:
+            if e.status == 429:
+                # Rate limited — wait and log but don't crash
+                retry_after = getattr(e, 'retry_after', 5.0) or 5.0
+                print(f"[safe_task:{name}] Rate limited — waiting {retry_after:.1f}s")
+                await asyncio.sleep(retry_after)
+            else:
+                _log_error(f"safe_task:{name}", e)
         except Exception as e:
             _log_error(f"safe_task:{name}", e)
     return asyncio.create_task(_wrapper())
@@ -3991,6 +3999,7 @@ def build_win_tracker_embed(guild, guild_id):
     return embed
 
 async def refresh_win_tracker(guild):
+    await asyncio.sleep(0.5)  # brief pause to avoid rate limits on rapid successive refreshes
     state = cached_get_state(guild.id)
     ch_id = state.get("win_tracker_ch_id")
     if not ch_id:
@@ -4012,6 +4021,7 @@ async def refresh_win_tracker(guild):
 # ====================== LIVE REFRESH HELPERS ======================
 
 async def refresh_player_list(guild):
+    await asyncio.sleep(0.5)
     state = cached_get_state(guild.id)
     ch  = guild.get_channel(state.get("player_list_ch_id") or 0)
     mid = state.get("player_list_msg_id")
@@ -19031,29 +19041,35 @@ class BBTemplateModeView(View):
         super().__init__(timeout=180)
         self.guild_id = guild_id
 
-        role_btn    = Button(label="🎭 Role Hints",         style=discord.ButtonStyle.primary)
-        general_btn = Button(label="📋 General Templates",  style=discord.ButtonStyle.secondary)
+        role_btn    = Button(label="🎭 Role Hints",          style=discord.ButtonStyle.primary,   row=0)
+        combine_btn = Button(label="🔀 Combine Events",       style=discord.ButtonStyle.green,     row=0)
+        general_btn = Button(label="📋 General Templates",   style=discord.ButtonStyle.secondary, row=1)
         role_btn.callback    = self.on_role_hints
+        combine_btn.callback = self.on_combine
         general_btn.callback = self.on_general
         self.add_item(role_btn)
+        self.add_item(combine_btn)
         self.add_item(general_btn)
+
+    async def on_combine(self, interaction: discord.Interaction):
+        hints = get_bb_hints_for_game(self.guild_id)
+        view  = BBCombineBuilderView(self.guild_id, hints)
+        embed = discord.Embed(
+            title       = "🔀 Combine Events into One Blood Board",
+            description = (
+                "Add each event that happened this phase one at a time.\n"
+                "When you're done, click **✍️ Generate Combined Board**.\n\n"
+                "*You can add up to 8 events.*"
+            ),
+            color = 0x8B0000
+        )
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     async def on_role_hints(self, interaction: discord.Interaction):
         hints = get_bb_hints_for_game(self.guild_id)
         if not hints:
             return await interaction.response.send_message(
                 "No roles found for the current game.", ephemeral=True)
-
-        # Event type selector first
-        event_opts = [
-            discord.SelectOption(label="🌙 Killed overnight",          value="killed"),
-            discord.SelectOption(label="☀️ Voted out",                  value="voted_out"),
-            discord.SelectOption(label="✨ Used their ability",          value="ability"),
-            discord.SelectOption(label="✅ Investigation — clean result", value="investigation_good"),
-            discord.SelectOption(label="❌ Investigation — bad result",   value="investigation_bad"),
-            discord.SelectOption(label="🐺 Wolf kill (wolf used ability)", value="ability"),
-            discord.SelectOption(label="🎭 Special ability variant",     value="ability_kill"),
-        ]
         view = BBEventSelectView(self.guild_id, hints)
         await interaction.response.send_message(
             "**What happened?** Select the event type:", view=view, ephemeral=True)
@@ -19080,6 +19096,203 @@ class BBTemplateModeView(View):
                 inline= False
             )
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+class BBCombineBuilderView(View):
+    """
+    Lets the mod queue multiple role/event pairs then generate one
+    combined Blood Board from all of them using Claude.
+    """
+    def __init__(self, guild_id: int, hints: dict, events: list = None):
+        super().__init__(timeout=600)
+        self.guild_id = guild_id
+        self.hints    = hints
+        self.events   = events or []   # list of (role, event_type, hint_body)
+
+        add_btn      = Button(label="➕ Add Event",              style=discord.ButtonStyle.primary,   row=0)
+        gen_btn      = Button(label="✍️ Generate Combined Board", style=discord.ButtonStyle.green,     row=0,
+                              disabled=len(self.events) == 0)
+        clear_btn    = Button(label="🗑️ Clear All",              style=discord.ButtonStyle.danger,    row=1,
+                              disabled=len(self.events) == 0)
+
+        add_btn.callback   = self.on_add
+        gen_btn.callback   = self.on_generate
+        clear_btn.callback = self.on_clear
+
+        self.add_item(add_btn)
+        self.add_item(gen_btn)
+        self.add_item(clear_btn)
+
+    def _queue_embed(self):
+        embed = discord.Embed(
+            title       = "🔀 Combine Events — Blood Board Builder",
+            description = "Add each event that happened. Generate when ready.",
+            color       = 0x8B0000
+        )
+        if self.events:
+            lines = []
+            for i, (role, event, _) in enumerate(self.events, 1):
+                lines.append(f"`{i}.` **{role}** — {event.replace('_', ' ')}")
+            embed.add_field(name="📋 Queued Events", value="\n".join(lines), inline=False)
+        else:
+            embed.add_field(name="📋 Queued Events", value="*None yet — add events above.*", inline=False)
+        embed.set_footer(text=f"{len(self.events)}/8 events added")
+        return embed
+
+    async def on_add(self, interaction: discord.Interaction):
+        if len(self.events) >= 8:
+            return await interaction.response.send_message(
+                "Maximum 8 events reached. Generate or clear first.", ephemeral=True)
+        view = BBCombineEventPickView(self.guild_id, self.hints, self.events, parent_msg=interaction.message)
+        await interaction.response.send_message(
+            "**What happened?** Pick an event type to add:",
+            view=view, ephemeral=True)
+
+    async def on_clear(self, interaction: discord.Interaction):
+        self.events.clear()
+        await interaction.response.edit_message(embed=self._queue_embed(),
+                                                 view=BBCombineBuilderView(self.guild_id, self.hints, self.events))
+
+    async def on_generate(self, interaction: discord.Interaction):
+        if not self.events:
+            return await interaction.response.send_message("Add at least one event first.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+
+        # Build prompt from queued hints
+        event_blocks = []
+        for i, (role, event_type, hint_body) in enumerate(self.events, 1):
+            event_blocks.append(
+                f"EVENT {i} — {role} ({event_type.replace('_', ' ')}):\n{hint_body}")
+
+        night_num = db_get_night_num(self.guild_id)
+        rows      = db_get_assignments(self.guild_id)
+        alive     = sum(1 for r in rows if r[2] == 1)
+
+        prompt = (
+            f"You are writing a Blood Board for Whisperfall — a Mafia/Werewolf game.\n\n"
+            f"The following events happened this phase (Night/Day {night_num}). "
+            f"Each event has a hint-based template below. "
+            f"Weave ALL of them into ONE cohesive atmospheric Blood Board narrative.\n\n"
+            f"RULES:\n"
+            f"- Never name any role directly. Keep all hints subtle.\n"
+            f"- Do not use section headers or bullet points — flowing prose only.\n"
+            f"- Paragraphs should flow into each other naturally.\n"
+            f"- End with the alive count: **Alive: {alive} remain**\n"
+            f"- End with one final atmospheric line.\n"
+            f"- Whisperfall tone: dark, literary, understated. No melodrama.\n\n"
+            f"EVENTS TO COMBINE:\n\n"
+            + "\n\n---\n\n".join(event_blocks)
+        )
+        system = (
+            "You write atmospheric Blood Board posts for Whisperfall — a social deduction game. "
+            "Your writing is dark, literary, and understated. "
+            "Never name roles directly. Combine multiple events into one seamless narrative. "
+            "Prose only — no bullet points, no headers, no role names."
+        )
+
+        combined = await _claude(prompt, system, max_tokens=1000)
+        if not combined:
+            return await interaction.followup.send(
+                "❌ Claude didn't return a response. Try again.", ephemeral=True)
+
+        # Post to mod-log for review
+        state   = cached_get_state(self.guild_id) or {}
+        mod_ch  = interaction.guild.get_channel(state.get("mod_log_channel_id") or 0)
+
+        embed = discord.Embed(
+            title       = f"🩸 Combined Blood Board — Night/Day {night_num}",
+            description = combined,
+            color       = 0x8B0000
+        )
+        event_summary = " · ".join(f"{role} ({et.replace('_',' ')})" for role, et, _ in self.events)
+        embed.set_footer(text=f"Events: {event_summary}")
+
+        view = BBTemplateActionView(self.guild_id, f"combined-night{night_num}", combined)
+
+        if mod_ch:
+            await mod_ch.send(
+                f"🩸 **Combined Blood Board draft** — {len(self.events)} events woven:",
+                embed=embed, view=view)
+            await interaction.followup.send(
+                f"✅ Combined board posted to mod-log — {len(self.events)} events woven.\n"
+                f"Review it there and use `/bloodboard` or `/dayboard` when ready.",
+                ephemeral=True)
+        else:
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+
+class BBCombineEventPickView(View):
+    """Step 1 of adding to the combine queue — pick event type."""
+    def __init__(self, guild_id, hints, events, parent_msg):
+        super().__init__(timeout=120)
+        self.guild_id   = guild_id
+        self.hints      = hints
+        self.events     = events
+        self.parent_msg = parent_msg
+
+        opts = [
+            discord.SelectOption(label="🌙 Killed overnight",                    value="killed"),
+            discord.SelectOption(label="☀️ Voted out",                            value="voted_out"),
+            discord.SelectOption(label="✨ Used their ability",                   value="ability"),
+            discord.SelectOption(label="✅ Investigation — clean result",         value="investigation_good"),
+            discord.SelectOption(label="❌ Investigation — bad result",           value="investigation_bad"),
+            discord.SelectOption(label="💉 Ability save (Doctor/Surgeon/Witch)",  value="ability_save"),
+            discord.SelectOption(label="☠️ Ability kill (Witch/Shadow Wolf etc)", value="ability_kill"),
+            discord.SelectOption(label="👑 Alpha turn — success",                 value="ability"),
+            discord.SelectOption(label="👑 Alpha turn — failed",                  value="ability_fail"),
+            discord.SelectOption(label="👻 Wraith marked a player",               value="ability_mark"),
+            discord.SelectOption(label="👻 Wraith Kill Command fired",            value="ability_kill"),
+        ]
+        sel = Select(placeholder="What happened?", options=opts[:25])
+        sel.callback = self.on_event
+        self.add_item(sel)
+
+    async def on_event(self, interaction: discord.Interaction):
+        event = interaction.data["values"][0]
+        matching = [(role, rh[event]) for role, rh in self.hints.items() if event in rh]
+        if not matching:
+            return await interaction.response.send_message(
+                f"No hints available for that event in the current game.", ephemeral=True)
+        view = BBCombineRolePickView(self.guild_id, self.hints, self.events,
+                                      matching, event, self.parent_msg)
+        await interaction.response.edit_message(
+            content="**Which role was involved?**", view=view)
+
+
+class BBCombineRolePickView(View):
+    """Step 2 — pick which role, then add to queue."""
+    def __init__(self, guild_id, hints, events, matching, event_type, parent_msg):
+        super().__init__(timeout=120)
+        self.guild_id   = guild_id
+        self.hints      = hints
+        self.events     = events
+        self.event_type = event_type
+        self.parent_msg = parent_msg
+        self.role_map   = {role: body for role, body in matching}
+
+        opts = [discord.SelectOption(label=role, value=role) for role, _ in matching[:25]]
+        sel  = Select(placeholder="Which role?", options=opts)
+        sel.callback = self.on_role
+        self.add_item(sel)
+
+    async def on_role(self, interaction: discord.Interaction):
+        role = interaction.data["values"][0]
+        body = self.role_map.get(role, "")
+        self.events.append((role, self.event_type, body))
+
+        # Update the parent builder message
+        builder_view  = BBCombineBuilderView(self.guild_id, self.hints, self.events)
+        builder_embed = builder_view._queue_embed()
+        try:
+            await self.parent_msg.edit(embed=builder_embed, view=builder_view)
+        except Exception:
+            pass
+
+        await interaction.response.edit_message(
+            content=f"✅ Added: **{role}** — {self.event_type.replace('_', ' ')}\n"
+                    f"*{len(self.events)}/8 events queued. Click ➕ Add Event to add more, "
+                    f"or ✍️ Generate Combined Board when ready.*",
+            view=None)
 
 
 class BBEventSelectView(View):
