@@ -9097,15 +9097,14 @@ async def end_game(interaction: discord.Interaction):
             "assignments" : [[str(x) for x in row] for row in db_get_assignments(interaction.guild_id)],
             "log"         : [[str(x) for x in row] for row in db_get_log(interaction.guild_id)],
         }
-        # Safe filename — no colons or special chars, works on Windows and Railway
+        # Save backup in same directory as DB file
         backup_filename = f"game_backup_{interaction.guild_id}_{int(_t.time())}.json"
-        # Save in script directory
-        backup_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), backup_filename)
+        backup_path = os.path.join(_DB_DIR, backup_filename)
         with open(backup_path, "w", encoding="utf-8") as f:
             json.dump(backup, f, indent=2)
         print(f"[end_game] Backup saved: {backup_path}")
     except Exception as e:
-        print(f"[end_game] Backup failed: {e}")
+        print(f"[end_game] Backup failed (non-critical): {e}")
 
     await interaction.followup.send("⏳ Ending game — deleting channels now. This may take a moment.", ephemeral=True)
 
