@@ -547,6 +547,14 @@ def init_db():
         c.execute("ALTER TABLE game_state ADD COLUMN chaos_hide_count INTEGER DEFAULT 0")
     except Exception:
         pass
+    try:
+        c.execute("ALTER TABLE game_state ADD COLUMN disney_mode INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        c.execute("ALTER TABLE game_state ADD COLUMN hp_mode INTEGER DEFAULT 0")
+    except Exception:
+        pass
 
     # Game recap storage — elimination log
     c.execute('''CREATE TABLE IF NOT EXISTS elimination_log (
@@ -921,6 +929,17 @@ def ch_name(label: str, style: str, emoji: str = "") -> str:
     # Discord channel names: no uppercase ASCII, spaces become hyphens
     # Unicode chars are fine as-is; only replace spaces
     return base.replace(" ", "-")
+
+def ch_name_themed(label: str, style: str, emoji: str = "",
+                   disney: bool = False, hp: bool = False) -> str:
+    """Return a themed channel name if disney=True or hp=True, otherwise standard."""
+    if disney:
+        themed = DISNEY_CHANNEL_NAMES.get(label, label)
+        return ch_name(themed, style, emoji)
+    if hp:
+        themed = HP_CHANNEL_NAMES.get(label, label)
+        return ch_name(themed, style, emoji)
+    return ch_name(label, style, emoji)
 
 # Per-guild font preference stored in memory (resets on restart, that's fine)
 def get_guild_font(guild_id: int) -> str:
@@ -3965,35 +3984,32 @@ def build_win_tracker_embed(guild, guild_id):
     alive_village = [r for r in alive if get_team(guild_id, r[1]) == "village"]
     alive_wolves  = [r for r in alive if get_team(guild_id, r[1]) == "wolf"]
     alive_neutral = [r for r in alive if get_team(guild_id, r[1]) == "neutral"]
-
     wolves_needed = max(0, len(alive_village) - len(alive_wolves))
+    t             = get_theme_labels(guild_id)
 
-    # Build player lists with NPC labels
-    npcs = db_get_npcs(guild_id)
-    npc_ids = {n["npc_id"] for n in npcs}
-
-    # Win tracker shows counts only — no role names visible to spectators
     embed = discord.Embed(title="⚖️ Win Condition Tracker", color=0x2C3E50)
-    embed.add_field(name=f"🏘️ Village",  value=str(len(alive_village)), inline=True)
-    embed.add_field(name=f"🐺 Wolves",   value=str(len(alive_wolves)),  inline=True)
-    embed.add_field(name=f"⚖️ Neutral",  value=str(len(alive_neutral)), inline=True)
+    embed.add_field(name=f"{t['village_icon']} {t['village']}", value=str(len(alive_village)), inline=True)
+    embed.add_field(name=f"{t['wolf_icon']} {t['wolf']}",      value=str(len(alive_wolves)),  inline=True)
+    embed.add_field(name=f"{t['neutral_icon']} {t['neutral']}", value=str(len(alive_neutral)), inline=True)
 
     if len(alive_wolves) == 0:
-        embed.add_field(name="🏆 Status", value="Village wins — all wolves eliminated!", inline=False)
+        embed.add_field(name="🏆 Status",
+                        value=f"{t['village']} wins — all {t['wolf'].lower()} eliminated!", inline=False)
         embed.color = 0x27AE60
     elif len(alive_wolves) >= len(alive_village):
-        embed.add_field(name="🏆 Status", value="Wolves win — they match or outnumber village!", inline=False)
+        embed.add_field(name="🏆 Status",
+                        value=f"{t['wolf']} win — they match or outnumber {t['village'].lower()}!", inline=False)
         embed.color = 0xC0392B
     elif wolves_needed == 1:
         embed.add_field(name="⚠️ CRITICAL",
-                        value="Wolves need **1 more kill** to win. Village is on the edge.", inline=False)
-        embed.color = 0xE67E22  # Orange — danger
+                        value=f"{t['wolf']} need **1 more** to win. {t['village']} is on the edge.", inline=False)
+        embed.color = 0xE67E22
     elif len(alive_wolves) == 1:
-        embed.add_field(name="🐺 Last Wolf",
-                        value=f"One wolf remains. Village needs **{wolves_needed}** more elimination(s).", inline=False)
-        embed.color = 0x2ECC71  # Green — village advantage
+        embed.add_field(name=f"{t['wolf_icon']} Last {t['wolf'][:-1] if t['wolf'].endswith('s') else t['wolf']}",
+                        value=f"One remains. {t['village']} needs **{wolves_needed}** more elimination(s).", inline=False)
+        embed.color = 0x2ECC71
     else:
-        embed.add_field(name="🐺 Wolves need",
+        embed.add_field(name=f"{t['wolf_icon']} {t['wolf']} need",
                         value=f"**{wolves_needed}** more elimination(s) to win", inline=False)
 
     embed.set_footer(text=f"Total alive: {len(alive)}  •  Updates automatically")
@@ -8118,51 +8134,236 @@ class ReplayWarningView(View):
             content="Cancelled. Use `/start_game` to try again.", view=None)
 
 
-def build_role_card(player: discord.Member, role_name: str, role_info: dict, font_style: str = "default") -> discord.Embed:
+def build_role_card(player: discord.Member, role_name: str, role_info: dict,
+                    font_style: str = "default", disney: bool = False,
+                    hp: bool = False) -> discord.Embed:
     """Build the rich private role-reveal embed sent to each player at game start."""
     team = role_info.get("team", "village")
 
+    # Get themed character name
+    if disney:
+        themed_name, _ = get_disney_role(role_name)
+        teams = DISNEY_TEAMS
+    elif hp:
+        themed_name, _ = get_hp_role(role_name)
+        teams = HP_TEAMS
+    else:
+        themed_name = None
+        teams = {"wolf": "🐺 WOLF PACK", "village": "🏘️ VILLAGE", "neutral": "⚖️ NEUTRAL"}
+
     # Team theming
     if team == "wolf":
-        color       = 0xC0392B   # deep red
-        team_label  = "🐺 WOLF PACK"
-        team_banner = (
-            "```ansi\n"
-            "\u001b[2;31m╔══════════════════════════════╗\n"
-            "║     YOU ARE A WOLF           ║\n"
-            "╚══════════════════════════════╝\n"
-            "\u001b[0m```"
-        )
-        flavor = "*Lurk in the shadows. Hunt by night. Trust no one outside the den.*"
+        color = 0xC0392B
+        if disney:
+            team_label  = f"⚔️ {DISNEY_TEAMS['wolf'].upper()}"
+            team_banner = (
+                "```ansi\n"
+                "\u001b[2;31m╔══════════════════════════════╗\n"
+                "║     YOU ARE A VILLAIN        ║\n"
+                "╚══════════════════════════════╝\n"
+                "\u001b[0m```"
+            )
+            flavor = "*Darkness is your ally. The Kingdom will fall before the Heroes find you.*"
+        elif hp:
+            team_label  = f"🐍 {HP_TEAMS['wolf'].upper()}"
+            team_banner = (
+                "```ansi\n"
+                "\u001b[2;31m╔══════════════════════════════╗\n"
+                "║   YOU SERVE THE DARK LORD    ║\n"
+                "╚══════════════════════════════╝\n"
+                "\u001b[0m```"
+            )
+            flavor = "*The Dark Mark is upon you. Serve well, and Voldemort will reward your loyalty.*"
+        else:
+            team_label  = "🐺 WOLF PACK"
+            team_banner = (
+                "```ansi\n"
+                "\u001b[2;31m╔══════════════════════════════╗\n"
+                "║     YOU ARE A WOLF           ║\n"
+                "╚══════════════════════════════╝\n"
+                "\u001b[0m```"
+            )
+            flavor = "*Lurk in the shadows. Hunt by night. Trust no one outside the den.*"
     elif team == "neutral":
-        color       = 0xF39C12   # amber
-        team_label  = "⚖️ NEUTRAL"
-        team_banner = (
-            "```ansi\n"
-            "\u001b[2;33m╔══════════════════════════════╗\n"
-            "║     YOU WALK ALONE           ║\n"
-            "╚══════════════════════════════╝\n"
-            "\u001b[0m```"
-        )
-        flavor = "*You answer to no one. Forge your own path and write your own fate.*"
+        color = 0xF39C12
+        if disney:
+            team_label  = f"✨ {DISNEY_TEAMS['neutral'].upper()}"
+            team_banner = (
+                "```ansi\n"
+                "\u001b[2;33m╔══════════════════════════════╗\n"
+                "║     YOU ARE ENCHANTED        ║\n"
+                "╚══════════════════════════════╝\n"
+                "\u001b[0m```"
+            )
+            flavor = "*Magic flows through you alone. Your story is yours to write.*"
+        elif hp:
+            team_label  = f"🌙 {HP_TEAMS['neutral'].upper()}"
+            team_banner = (
+                "```ansi\n"
+                "\u001b[2;33m╔══════════════════════════════╗\n"
+                "║     YOU WALK ALONE           ║\n"
+                "╚══════════════════════════════╝\n"
+                "\u001b[0m```"
+            )
+            flavor = "*You answer to neither the Order nor the Dark Lord. Your fate is your own.*"
+        else:
+            team_label  = "⚖️ NEUTRAL"
+            team_banner = (
+                "```ansi\n"
+                "\u001b[2;33m╔══════════════════════════════╗\n"
+                "║     YOU WALK ALONE           ║\n"
+                "╚══════════════════════════════╝\n"
+                "\u001b[0m```"
+            )
+            flavor = "*You answer to no one. Forge your own path and write your own fate.*"
     else:
-        color       = 0x27AE60   # forest green
-        team_label  = "🏘️ VILLAGE"
-        team_banner = (
-            "```ansi\n"
-            "\u001b[2;32m╔══════════════════════════════╗\n"
-            "║     YOU ARE A VILLAGER       ║\n"
-            "╚══════════════════════════════╝\n"
-            "\u001b[0m```"
-        )
-        flavor = "*The village is counting on you. Root out the wolves before it is too late.*"
+        color = 0x27AE60
+        if disney:
+            team_label  = f"🏰 {DISNEY_TEAMS['village'].upper()}"
+            team_banner = (
+                "```ansi\n"
+                "\u001b[2;32m╔══════════════════════════════╗\n"
+                "║     YOU ARE A HERO           ║\n"
+                "╚══════════════════════════════╝\n"
+                "\u001b[0m```"
+            )
+            flavor = "*The Kingdom is counting on you. Find the Villains before darkness prevails.*"
+        elif hp:
+            team_label  = f"⚡ {HP_TEAMS['village'].upper()}"
+            team_banner = (
+                "```ansi\n"
+                "\u001b[2;32m╔══════════════════════════════╗\n"
+                "║  YOU FIGHT FOR THE ORDER     ║\n"
+                "╚══════════════════════════════╝\n"
+                "\u001b[0m```"
+            )
+            flavor = "*The wizarding world is counting on you. Root out the Death Eaters before it is too late.*"
+        else:
+            team_label  = "🏘️ VILLAGE"
+            team_banner = (
+                "```ansi\n"
+                "\u001b[2;32m╔══════════════════════════════╗\n"
+                "║     YOU ARE A VILLAGER       ║\n"
+                "╚══════════════════════════════╝\n"
+                "\u001b[0m```"
+            )
+            flavor = "*The village is counting on you. Root out the wolves before it is too late.*"
 
-    styled_name = apply_font(role_name.upper(), font_style)
-    embed = discord.Embed(
-        title=f"🎭  {styled_name}",
-        color=color
-    )
+    if themed_name:
+        styled_name = apply_font(themed_name.upper(), font_style)
+        icon = "🏰" if disney else "⚡"
+        title = f"{icon}  {styled_name}"
+    else:
+        styled_name = apply_font(role_name.upper(), font_style)
+        title = f"🎭  {styled_name}"
+
+    embed = discord.Embed(title=title, color=color)
     embed.add_field(name="​", value=team_banner, inline=False)
+
+    # Show original role name in themed modes
+    if themed_name:
+        embed.add_field(
+            name  = "🎭 Original Role",
+            value = f"*{role_name}*",
+            inline= False
+        )
+
+    embed.add_field(
+        name="📜 Your Ability",
+        value=role_info.get("description") or "*No description provided.*",
+        inline=False
+    )
+    embed.add_field(name="​", value=flavor, inline=False)
+    embed.set_footer(
+        text=f"{team_label}  ·  {player.display_name}  ·  This channel is private — only you and the mod can see it."
+    )
+
+    # Team theming
+    if team == "wolf":
+        color = 0xC0392B
+        if disney:
+            team_label  = "⚔️ VILLAIN"
+            team_banner = (
+                "```ansi\n"
+                "\u001b[2;31m╔══════════════════════════════╗\n"
+                "║     YOU ARE A VILLAIN        ║\n"
+                "╚══════════════════════════════╝\n"
+                "\u001b[0m```"
+            )
+            flavor = "*Darkness is your ally. The Kingdom will fall before the Heroes find you.*"
+        else:
+            team_label  = "🐺 WOLF PACK"
+            team_banner = (
+                "```ansi\n"
+                "\u001b[2;31m╔══════════════════════════════╗\n"
+                "║     YOU ARE A WOLF           ║\n"
+                "╚══════════════════════════════╝\n"
+                "\u001b[0m```"
+            )
+            flavor = "*Lurk in the shadows. Hunt by night. Trust no one outside the den.*"
+    elif team == "neutral":
+        color = 0xF39C12
+        if disney:
+            team_label  = "✨ ENCHANTED"
+            team_banner = (
+                "```ansi\n"
+                "\u001b[2;33m╔══════════════════════════════╗\n"
+                "║     YOU ARE ENCHANTED        ║\n"
+                "╚══════════════════════════════╝\n"
+                "\u001b[0m```"
+            )
+            flavor = "*Magic flows through you alone. Your story is yours to write.*"
+        else:
+            team_label  = "⚖️ NEUTRAL"
+            team_banner = (
+                "```ansi\n"
+                "\u001b[2;33m╔══════════════════════════════╗\n"
+                "║     YOU WALK ALONE           ║\n"
+                "╚══════════════════════════════╝\n"
+                "\u001b[0m```"
+            )
+            flavor = "*You answer to no one. Forge your own path and write your own fate.*"
+    else:
+        color = 0x27AE60
+        if disney:
+            team_label  = "🏰 HERO"
+            team_banner = (
+                "```ansi\n"
+                "\u001b[2;32m╔══════════════════════════════╗\n"
+                "║     YOU ARE A HERO           ║\n"
+                "╚══════════════════════════════╝\n"
+                "\u001b[0m```"
+            )
+            flavor = "*The Kingdom is counting on you. Find the Villains before darkness prevails.*"
+        else:
+            team_label  = "🏘️ VILLAGE"
+            team_banner = (
+                "```ansi\n"
+                "\u001b[2;32m╔══════════════════════════════╗\n"
+                "║     YOU ARE A VILLAGER       ║\n"
+                "╚══════════════════════════════╝\n"
+                "\u001b[0m```"
+            )
+            flavor = "*The village is counting on you. Root out the wolves before it is too late.*"
+
+    if disney and disney_name:
+        styled_name = apply_font(disney_name.upper(), font_style)
+        title = f"🏰  {styled_name}"
+    else:
+        styled_name = apply_font(role_name.upper(), font_style)
+        title = f"🎭  {styled_name}"
+
+    embed = discord.Embed(title=title, color=color)
+    embed.add_field(name="​", value=team_banner, inline=False)
+
+    # Show original role name in Disney mode so players know the mechanics
+    if disney and disney_name:
+        embed.add_field(
+            name  = "🎭 Original Role",
+            value = f"*{role_name}*",
+            inline= False
+        )
+
     embed.add_field(
         name="📜 Your Ability",
         value=role_info.get("description") or "*No description provided.*",
@@ -8175,11 +8376,230 @@ def build_role_card(player: discord.Member, role_name: str, role_info: dict, fon
     return embed
 
 
+# ====================== DISNEY THEME ======================
+
+DISNEY_ROLE_MAP = {
+    # Villains (Wolves)
+    "Wolf":         ("Villain Henchman",    "wolf"),
+    "Alpha":        ("Maleficent",          "wolf"),
+    "Elite Alpha":  ("Ursula",              "wolf"),
+    "Blessed Wolf": ("Gaston",              "wolf"),
+    "Bloodhound":   ("Scar's Spy",          "wolf"),
+    "Bloodletter":  ("Dr. Facilier",        "wolf"),
+    "Crazed Wolf":  ("Yzma",               "wolf"),
+    "Dire Wolf":    ("Hades",              "wolf"),
+    "Echo-Stalker": ("Jafar's Parrot",     "wolf"),
+    "Shadow Wolf":  ("Captain Barbossa",   "wolf"),
+    "Werekitten":   ("Cheshire Cat",       "wolf"),
+    "Wolf Pup":     ("LeFou",              "wolf"),
+    # Heroes (Village)
+    "Villager":        ("Townsperson",        "village"),
+    "Seer":            ("Merlin",             "village"),
+    "Doctor":          ("Fairy Godmother",    "village"),
+    "Surgeon":         ("Doc",               "village"),
+    "Huntsman":        ("Flynn Rider",        "village"),
+    "Sheriff":         ("Cogsworth",          "village"),
+    "Medium":          ("Grandmother Willow", "village"),
+    "Mayor":           ("King Triton",        "village"),
+    "Governor":        ("The Sultan",         "village"),
+    "Elder":           ("Genie",              "village"),
+    "Insomniac":       ("Jiminy Cricket",     "village"),
+    "Agitator":        ("Tinker Bell",        "village"),
+    "Hermit":          ("Quasimodo",          "village"),
+    "Cupid":           ("Cinderella's Fairy", "village"),
+    "Gravedigger":     ("Pain & Panic",       "village"),
+    "Clone":           ("Magic Mirror",       "village"),
+    "Shapeshifter":    ("Merida",             "village"),
+    "Drunk":           ("Flounder",           "village"),
+    "Pothead":         ("Baloo",              "village"),
+    "Prostitute":      ("Megara",             "village"),
+    "Jafar":           ("Pascal",             "village"),
+    "Lycan":           ("The Beast",          "village"),
+    "Time Lord":       ("Mad Hatter",         "village"),
+    "Village Idiot":   ("Dopey",              "village"),
+    "Village Jokester":("Genie (Comedy)",     "village"),
+    "Virgin":          ("Sleeping Beauty",    "village"),
+    "Traitor":         ("Pinocchio",          "village"),
+    "White Wolf":      ("Elsa",              "village"),
+    # Enchanted (Neutral)
+    "Witch":           ("Madam Mim",          "neutral"),
+    "Oracle":          ("Blue Fairy",         "neutral"),
+    "Warlock":         ("Yen Sid",            "neutral"),
+    "Fairy Elf":       ("Tinker Bell",        "neutral"),
+    "Wraith":          ("Headless Horseman",  "neutral"),
+}
+
+# Disney channel name overrides
+DISNEY_CHANNEL_NAMES = {
+    "mod-log":      "royal-council",
+    "player-list":  "kingdom-roster",
+    "role-list":    "enchanted-roles",
+    "night-order":  "spell-order",
+    "day-vote":     "royal-vote",
+    "timeline":     "kingdom-chronicle",
+    "stats":        "hall-of-fame",
+    "blood-board":  "royal-decree",
+    "wolf-den":     "villain-lair",
+    "ghost-chat":   "spirit-realm",
+    "wraith-den":   "shadow-realm",
+    "win-tracker":  "kingdom-balance",
+    "village-chat": "enchanted-village",
+    "spectator-qa": "royal-observer",
+}
+
+# Disney team names
+DISNEY_TEAMS = {
+    "wolf":    "Villains",
+    "village": "Heroes",
+    "neutral": "Enchanted",
+}
+
+def get_disney_role(role_name: str) -> tuple:
+    """Return (disney_name, team) for a role, or original name if not mapped."""
+    return DISNEY_ROLE_MAP.get(role_name, (role_name, None))
+
+def get_disney_channel_name(base_name: str, font: str, emoji: str = "") -> str:
+    """Return Disney-themed channel name if disney mode, else standard ch_name."""
+    disney_name = DISNEY_CHANNEL_NAMES.get(base_name, base_name)
+    styled = apply_font(disney_name, font)
+    base   = f"{emoji}{styled}" if emoji else styled
+    return base.replace(" ", "-")
+
+def get_theme_labels(guild_id: int) -> dict:
+    """Return theme-appropriate labels for teams and setting name."""
+    state   = cached_get_state(guild_id) or {}
+    disney  = bool(state.get("disney_mode", 0))
+    hp      = bool(state.get("hp_mode", 0))
+    if disney:
+        return {
+            "village":      "Heroes",
+            "wolf":         "Villains",
+            "neutral":      "Enchanted",
+            "setting":      "the Enchanted Kingdom",
+            "village_icon": "🏰",
+            "wolf_icon":    "⚔️",
+            "neutral_icon": "✨",
+            "den_name":     "Villain Lair",
+        }
+    elif hp:
+        return {
+            "village":      "Order of the Phoenix",
+            "wolf":         "Death Eaters",
+            "neutral":      "Unaligned",
+            "setting":      "the Wizarding World",
+            "village_icon": "⚡",
+            "wolf_icon":    "🐍",
+            "neutral_icon": "🌙",
+            "den_name":     "Chamber of Secrets",
+        }
+    else:
+        return {
+            "village":      "Village",
+            "wolf":         "Wolves",
+            "neutral":      "Neutral",
+            "setting":      "Whisperfall",
+            "village_icon": "🏘️",
+            "wolf_icon":    "🐺",
+            "neutral_icon": "⚖️",
+            "den_name":     "Wolf Den",
+        }
+
+
+def is_disney_mode(guild_id: int) -> bool:
+    """Check if this guild's current game is running in Disney theme."""
+    state = cached_get_state(guild_id) or {}
+    return bool(state.get("disney_mode", 0))
+
+
+# ====================== HARRY POTTER THEME ======================
+
+HP_ROLE_MAP = {
+    # Death Eaters (Wolves)
+    "Wolf":         ("Death Eater",        "wolf"),
+    "Alpha":        ("Grindelwald",        "wolf"),
+    "Elite Alpha":  ("Voldemort",          "wolf"),
+    "Blessed Wolf": ("Fenrir Greyback",    "wolf"),
+    "Bloodhound":   ("Nagini",             "wolf"),
+    "Bloodletter":  ("Dolores Umbridge",   "wolf"),
+    "Crazed Wolf":  ("Barty Crouch Jr.",   "wolf"),
+    "Dire Wolf":    ("Wormtail",           "wolf"),
+    "Echo-Stalker": ("Mundungus Fletcher", "wolf"),
+    "Shadow Wolf":  ("Igor Karkaroff",     "wolf"),
+    "Werekitten":   ("Bellatrix Lestrange","wolf"),
+    "Wolf Pup":     ("Draco Malfoy",       "wolf"),
+    # Order of the Phoenix (Village)
+    "Villager":          ("Hogwarts Student",      "village"),
+    "Seer":              ("Professor Trelawney",   "village"),
+    "Doctor":            ("Madam Pomfrey",         "village"),
+    "Surgeon":           ("Newt Scamander",        "village"),
+    "Huntsman":          ("Harry Potter",          "village"),
+    "Sheriff":           ("Hermione Granger",      "village"),
+    "Medium":            ("Moaning Myrtle",        "village"),
+    "Mayor":             ("Albus Dumbledore",      "village"),
+    "Governor":          ("Minister Fudge",        "village"),
+    "Elder":             ("Nicolas Flamel",        "village"),
+    "Insomniac":         ("Dobby",                 "village"),
+    "Agitator":          ("Fred Weasley",          "village"),
+    "Hermit":            ("Hagrid",                "village"),
+    "Cupid":             ("Lavender Brown",        "village"),
+    "Gravedigger":       ("Peeves",                "village"),
+    "Clone":             ("Polyjuice Potion",      "village"),
+    "Shapeshifter":      ("Nymphadora Tonks",      "village"),
+    "Drunk":             ("Seamus Finnigan",       "village"),
+    "Pothead":           ("Neville Longbottom",    "village"),
+    "Prostitute":        ("Madam Rosmerta",        "village"),
+    "Jafar":             ("Professor Slughorn",    "village"),
+    "Lycan":             ("Remus Lupin",           "village"),
+    "Time Lord":         ("Hermione's Time-Turner","village"),
+    "Village Idiot":     ("Crabbe",                "village"),
+    "Village Jokester":  ("George Weasley",        "village"),
+    "Virgin":            ("Ginny Weasley",         "village"),
+    "Traitor":           ("Severus Snape",         "village"),
+    "White Wolf":        ("Sirius Black",          "village"),
+    # Unaligned (Neutral)
+    "Witch":     ("Sybill Trelawney",  "neutral"),
+    "Oracle":    ("The Sorting Hat",   "neutral"),
+    "Warlock":   ("Gilderoy Lockhart", "neutral"),
+    "Fairy Elf": ("Dobby (Free Elf)",  "neutral"),
+    "Wraith":    ("Dementors",         "neutral"),
+}
+
+HP_CHANNEL_NAMES = {
+    "mod-log":      "headmaster-office",
+    "player-list":  "marauders-map",
+    "role-list":    "sorting-results",
+    "night-order":  "spell-order",
+    "day-vote":     "wizengamot",
+    "timeline":     "hogwarts-chronicle",
+    "stats":        "house-points",
+    "blood-board":  "daily-prophet",
+    "wolf-den":     "chamber-of-secrets",
+    "ghost-chat":   "nearly-headless-lounge",
+    "wraith-den":   "dementor-lair",
+    "win-tracker":  "order-balance",
+    "village-chat": "great-hall",
+    "spectator-qa": "owlery",
+}
+
+HP_TEAMS = {
+    "wolf":    "Death Eaters",
+    "village": "Order of the Phoenix",
+    "neutral": "Unaligned",
+}
+
+def get_hp_role(role_name: str) -> tuple:
+    """Return (hp_name, team) for a role, or original name if not mapped."""
+    return HP_ROLE_MAP.get(role_name, (role_name, None))
+
+def is_hp_mode(guild_id: int) -> bool:
+    """Check if this guild's current game is running in Harry Potter theme."""
+    state = cached_get_state(guild_id) or {}
+    return bool(state.get("hp_mode", 0))
+
+
 class ChaosModeView(View):
     """
-    Shown after roster confirmation — lets mod pick a chaos mode before launching.
-    Three options: Normal, Partial Chaos (hidden roles), Hidden Count (unknown players),
-    Full Chaos (both hidden).
+    Shown after roster confirmation — lets mod pick theme and chaos mode before launching.
     """
     def __init__(self, guild_id, final_counts, all_roles, npc_count=0):
         super().__init__(timeout=300)
@@ -8189,18 +8609,24 @@ class ChaosModeView(View):
         self.npc_count    = npc_count
 
         normal_btn  = Button(label="🎮 Normal Game",                        style=discord.ButtonStyle.green,     row=0)
-        role_btn    = Button(label="🎭 Partial Chaos — Hidden Roster",        style=discord.ButtonStyle.primary,   row=0)
-        count_btn   = Button(label="👥 Hidden Count — Unknown Players",       style=discord.ButtonStyle.primary,   row=1)
-        full_btn    = Button(label="🌪️ Full Chaos — Roster + Count Hidden",   style=discord.ButtonStyle.danger,    row=1)
+        disney_btn  = Button(label="🏰 Disney Theme",                        style=discord.ButtonStyle.primary,   row=0)
+        hp_btn      = Button(label="⚡ Harry Potter Theme",                   style=discord.ButtonStyle.primary,   row=0)
+        role_btn    = Button(label="🎭 Partial Chaos — Hidden Roster",        style=discord.ButtonStyle.secondary, row=1)
+        count_btn   = Button(label="👥 Hidden Count — Unknown Players",       style=discord.ButtonStyle.secondary, row=1)
+        full_btn    = Button(label="🌪️ Full Chaos — Roster + Count Hidden",   style=discord.ButtonStyle.danger,    row=2)
         cancel_btn  = Button(label="Cancel",                                   style=discord.ButtonStyle.secondary, row=2)
 
-        normal_btn.callback  = lambda i: self._launch(i, hide_roles=False, hide_count=False)
-        role_btn.callback    = lambda i: self._launch(i, hide_roles=True,  hide_count=False)
-        count_btn.callback   = lambda i: self._launch(i, hide_roles=False, hide_count=True)
-        full_btn.callback    = lambda i: self._launch(i, hide_roles=True,  hide_count=True)
+        normal_btn.callback  = lambda i: self._launch(i, hide_roles=False, hide_count=False, disney=False, hp=False)
+        disney_btn.callback  = lambda i: self._launch(i, hide_roles=False, hide_count=False, disney=True,  hp=False)
+        hp_btn.callback      = lambda i: self._launch(i, hide_roles=False, hide_count=False, disney=False, hp=True)
+        role_btn.callback    = lambda i: self._launch(i, hide_roles=True,  hide_count=False, disney=False, hp=False)
+        count_btn.callback   = lambda i: self._launch(i, hide_roles=False, hide_count=True,  disney=False, hp=False)
+        full_btn.callback    = lambda i: self._launch(i, hide_roles=True,  hide_count=True,  disney=False, hp=False)
         cancel_btn.callback  = self.on_cancel
 
         self.add_item(normal_btn)
+        self.add_item(disney_btn)
+        self.add_item(hp_btn)
         self.add_item(role_btn)
         self.add_item(count_btn)
         self.add_item(full_btn)
@@ -8210,14 +8636,16 @@ class ChaosModeView(View):
         await interaction.response.edit_message(content="❌ Game start cancelled.", view=None)
         self.stop()
 
-    async def _launch(self, interaction: discord.Interaction, hide_roles: bool, hide_count: bool):
+    async def _launch(self, interaction: discord.Interaction,
+                      hide_roles: bool, hide_count: bool, disney: bool = False, hp: bool = False):
         try:
             await interaction.response.defer(ephemeral=True)
         except Exception:
             return
         try:
             view = ConfirmStartView(self.guild_id, self.final_counts, self.all_roles,
-                                    self.npc_count, hide_roles=hide_roles, hide_count=hide_count)
+                                    self.npc_count, hide_roles=hide_roles,
+                                    hide_count=hide_count, disney=disney, hp=hp)
             await view.launch_game(interaction)
         except Exception as e:
             import traceback
@@ -8231,7 +8659,7 @@ class ChaosModeView(View):
 
 class ConfirmStartView(View):
     def __init__(self, guild_id, final_counts, all_roles, npc_count=0,
-                 hide_roles=False, hide_count=False):
+                 hide_roles=False, hide_count=False, disney=False, hp=False):
         super().__init__(timeout=300)
         self.guild_id     = guild_id
         self.final_counts = final_counts
@@ -8239,6 +8667,8 @@ class ConfirmStartView(View):
         self.npc_count    = npc_count
         self.hide_roles   = hide_roles
         self.hide_count   = hide_count
+        self.disney       = disney
+        self.hp           = hp
         start_btn  = Button(label="🚀 Start Game", style=discord.ButtonStyle.green)
         cancel_btn = Button(label="Cancel",         style=discord.ButtonStyle.danger)
         start_btn.callback  = self.on_start
@@ -8267,6 +8697,8 @@ class ConfirmStartView(View):
     async def launch_game(self, interaction: discord.Interaction):
         hide_roles = getattr(self, 'hide_roles', False)
         hide_count = getattr(self, 'hide_count', False)
+        disney     = getattr(self, 'disney', False)
+        hp         = getattr(self, 'hp', False)
         state     = cached_get_state(interaction.guild_id)
         p_role_id = state.get("participant_role_id")
         p_role    = interaction.guild.get_role(p_role_id) if p_role_id else None
@@ -8362,7 +8794,7 @@ class ConfirmStartView(View):
             if mod_role:
                 mod_log_ow[mod_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
             if spec_role: mod_log_ow[spec_role] = read_ow
-            mod_log_ch = await category.create_text_channel(ch_name("mod-log",     font, "📋"), overwrites=mod_log_ow)
+            mod_log_ch = await category.create_text_channel(ch_name_themed("mod-log",     font, "📋", disney=disney, hp=hp), overwrites=mod_log_ow)
         except discord.errors.Forbidden:
             await category.delete()
             return await interaction.followup.send(
@@ -8376,19 +8808,19 @@ class ConfirmStartView(View):
         player_list_ow = {everyone: read_ow, bot_me: bot_ow}
         if mod_role:  player_list_ow[mod_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
         if spec_role: player_list_ow[spec_role] = read_ow
-        player_list_ch = await category.create_text_channel(ch_name("player-list",  font, "📋"), overwrites=player_list_ow)
+        player_list_ch = await category.create_text_channel(ch_name_themed("player-list",  font, "📋", disney=disney, hp=hp), overwrites=player_list_ow)
 
         # role-list
         role_list_ow = {everyone: read_ow, bot_me: bot_ow}
         if mod_role:  role_list_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
         if spec_role: role_list_ow[spec_role] = read_ow
-        role_list_ch = await category.create_text_channel(ch_name("role-list",    font, "📜"), overwrites=role_list_ow)
+        role_list_ch = await category.create_text_channel(ch_name_themed("role-list",    font, "📜", disney=disney, hp=hp), overwrites=role_list_ow)
 
         # night-order — static reference channel, read-only for everyone
         night_ref_ow = {everyone: read_ow, bot_me: bot_ow}
         if spec_role: night_ref_ow[spec_role] = read_ow
         if mod_role:  night_ref_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True)
-        night_ref_ch = await category.create_text_channel(ch_name("night-order", font, "🌙"), overwrites=night_ref_ow)
+        night_ref_ch = await category.create_text_channel(ch_name_themed("night-order", font, "🌙", disney=disney, hp=hp), overwrites=night_ref_ow)
 
         night_order_embed = discord.Embed(
             title       = "🌙 Night Phase — Order of Operations",
@@ -8455,19 +8887,19 @@ class ConfirmStartView(View):
         if mod_role:  day_vote_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
         if p_role:    day_vote_ow[p_role]    = part_ow_vote
         if spec_role: day_vote_ow[spec_role] = part_ow_vote
-        day_vote_ch = await category.create_text_channel(ch_name("day-vote",     font, "🗳️"), overwrites=day_vote_ow)
+        day_vote_ch = await category.create_text_channel(ch_name_themed("day-vote",     font, "🗳️", disney=disney, hp=hp), overwrites=day_vote_ow)
 
         # timeline
         timeline_ow = {everyone: read_ow, bot_me: bot_ow}
         if mod_role:  timeline_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
         if spec_role: timeline_ow[spec_role] = read_ow
-        timeline_ch = await category.create_text_channel(ch_name("timeline",     font, "⏰"), overwrites=timeline_ow)
+        timeline_ch = await category.create_text_channel(ch_name_themed("timeline",     font, "⏰", disney=disney, hp=hp), overwrites=timeline_ow)
 
         # stats
         stats_ow = {everyone: read_ow, bot_me: bot_ow}
         if mod_role:  stats_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
         if spec_role: stats_ow[spec_role] = read_ow
-        stats_ch = await category.create_text_channel(ch_name("stats",        font, "📊"), overwrites=stats_ow)
+        stats_ch = await category.create_text_channel(ch_name_themed("stats",        font, "📊", disney=disney, hp=hp), overwrites=stats_ow)
 
         # spectator-qa — spectators ask questions, mods answer; players cannot see
         spec_qa_ow = {
@@ -8476,7 +8908,7 @@ class ConfirmStartView(View):
         }
         if mod_role:  spec_qa_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
         if spec_role: spec_qa_ow[spec_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
-        spec_qa_ch = await category.create_text_channel(ch_name("spectator-qa", font, "👁️"), overwrites=spec_qa_ow)
+        spec_qa_ch = await category.create_text_channel(ch_name_themed("spectator-qa", font, "👁️", disney=disney, hp=hp), overwrites=spec_qa_ow)
         # Pin a welcome message so spectators know how to use it
         spec_pin = await spec_qa_ch.send(
             "👁️ **Spectator Q&A**\n\n"
@@ -8494,7 +8926,7 @@ class ConfirmStartView(View):
         }
         if mod_role:  bb_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True)
         if spec_role: bb_ow[spec_role] = read_ow
-        bb_game_ch = await category.create_text_channel(ch_name("blood-board", font, "🩸"), overwrites=bb_ow)
+        bb_game_ch = await category.create_text_channel(ch_name_themed("blood-board", font, "🩸", disney=disney, hp=hp), overwrites=bb_ow)
 
         # wolf-den (wolf chat — dead wolves get read-only)
         # Bloodhound and Wolf Pup are wolf-team but NOT in the den
@@ -8508,7 +8940,7 @@ class ConfirmStartView(View):
         for wp in wolf_players:
             wolf_ow[wp] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
         if spec_role: wolf_ow[spec_role] = read_ow
-        wolf_ch = await category.create_text_channel(ch_name("wolf-den",     font, "🐺"), overwrites=wolf_ow)
+        wolf_ch = await category.create_text_channel(ch_name_themed("wolf-den",     font, "🐺", disney=disney, hp=hp), overwrites=wolf_ow)
 
         # wolf-vote — wolves + den-excluded wolf roles (Bloodhound, Wolf Pup) can all vote
         den_excluded = [p for p in players
@@ -8520,7 +8952,7 @@ class ConfirmStartView(View):
         ghost_ow = {everyone: discord.PermissionOverwrite(view_channel=False), bot_me: bot_ow}
         if mod_role:  ghost_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
         if spec_role: ghost_ow[spec_role] = read_ow
-        ghost_ch = await category.create_text_channel(ch_name("ghost-chat",   font, "👻"), overwrites=ghost_ow)
+        ghost_ch = await category.create_text_channel(ch_name_themed("ghost-chat",   font, "👻", disney=disney, hp=hp), overwrites=ghost_ow)
 
         # wraith-den — only if Wraiths are in the game
         wraith_players = [p for p in players if assignments.get(p.id) == "Wraith"]
@@ -8531,14 +8963,14 @@ class ConfirmStartView(View):
                 wraith_ow[wp] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
             if mod_role:  wraith_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True)
             if spec_role: wraith_ow[spec_role] = read_ow
-            wraith_ch = await category.create_text_channel(ch_name("wraith-den", font, "👻"), overwrites=wraith_ow)
+            wraith_ch = await category.create_text_channel(ch_name_themed("wraith-den", font, "👻", disney=disney, hp=hp), overwrites=wraith_ow)
 
         # win-tracker
         # Win tracker — mod only, never visible to players
         win_tracker_ow = {everyone: discord.PermissionOverwrite(view_channel=False), bot_me: bot_ow}
         if mod_role:  win_tracker_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=False, read_messages=True)
         if spec_role: win_tracker_ow[spec_role] = read_ow
-        win_tracker_ch = await category.create_text_channel(ch_name("win-tracker", font, "⚖️"), overwrites=win_tracker_ow)
+        win_tracker_ch = await category.create_text_channel(ch_name_themed("win-tracker", font, "⚖️", disney=disney, hp=hp), overwrites=win_tracker_ow)
 
         # village-chat — always created fresh inside the game category
         # This ensures multi-server support and clean channel permissions each game
@@ -8550,7 +8982,7 @@ class ConfirmStartView(View):
         if spec_role: village_chat_ow[spec_role] = discord.PermissionOverwrite(view_channel=True,  send_messages=False)
         if mod_role:  village_chat_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True,  send_messages=True)
         if dead_role: village_chat_ow[dead_role] = discord.PermissionOverwrite(view_channel=True,  send_messages=False)
-        village_chat_ch = await category.create_text_channel(ch_name("village-chat", font, "💬"), overwrites=village_chat_ow)
+        village_chat_ch = await category.create_text_channel(ch_name_themed("village-chat", font, "💬", disney=disney, hp=hp), overwrites=village_chat_ow)
 
         # private player channels
         player_channels = {}
@@ -8572,7 +9004,7 @@ class ConfirmStartView(View):
             player_channels[player.id] = ch.id
 
             # Send role card — player always sees their own role
-            embed    = build_role_card(player, role_name, role_info, font)
+            embed    = build_role_card(player, role_name, role_info, font, disney=disney, hp=hp)
             role_msg = await ch.send(player.mention, embed=embed)
             try:
                 await role_msg.pin()
@@ -8965,7 +9397,9 @@ class ConfirmStartView(View):
             investigations_done=0,
             time_lord_triggered=0,
             chaos_hide_roles=1 if hide_roles else 0,
-            chaos_hide_count=1 if hide_count else 0
+            chaos_hide_count=1 if hide_count else 0,
+            disney_mode=1 if disney else 0,
+            hp_mode=1 if hp else 0
         )
 
         # Timeline embed
@@ -9031,25 +9465,38 @@ class ConfirmStartView(View):
             view=view
         )
 
-        # Announce chaos mode to village-chat
-        if hide_roles or hide_count:
+        # Announce mode to village-chat
+        if disney or hp or hide_roles or hide_count:
             vc_announce = interaction.guild.get_channel(
                 (cached_get_state(interaction.guild_id) or {}).get("village_chat_ch_id") or 0)
             if vc_announce:
-                chaos_lines = []
-                if hide_roles and hide_count:
-                    chaos_lines.append("🌪️ **Full Chaos Game**")
-                    chaos_lines.append("*You know your own role. You do not know what other roles are in play, or how many stand with you.*")
-                    chaos_lines.append("*Observe. Deduce. Trust nothing.*")
+                if disney:
+                    await vc_announce.send(
+                        "🏰 **Welcome to the Enchanted Kingdom**\n\n"
+                        "*Heroes and Villains walk among you. Not all is as it seems.*\n"
+                        "*The Kingdom will not rest until the darkness is found.*\n\n"
+                        "✨ *This is a Disney themed game. Your role card shows your Disney character.*")
+                elif hp:
+                    await vc_announce.send(
+                        "⚡ **Welcome to Hogwarts**\n\n"
+                        "*The Order of the Phoenix and Death Eaters walk among you.*\n"
+                        "*The wizarding world will not rest until the Dark Lord's servants are found.*\n\n"
+                        "🪄 *This is a Harry Potter themed game. Your role card shows your character.*")
+                elif hide_roles and hide_count:
+                    await vc_announce.send(
+                        "🌪️ **Full Chaos Game**\n"
+                        "*You know your own role. You do not know what other roles are in play, or how many stand with you.*\n"
+                        "*Observe. Deduce. Trust nothing.*")
                 elif hide_roles:
-                    chaos_lines.append("🎭 **Chaos Game — Hidden Roster**")
-                    chaos_lines.append("*You know your own role. The roles others are playing are unknown.*")
-                    chaos_lines.append("*The village does not know what it is up against.*")
+                    await vc_announce.send(
+                        "🎭 **Chaos Game — Hidden Roster**\n"
+                        "*You know your own role. The roles others are playing are unknown.*\n"
+                        "*The village does not know what it is up against.*")
                 elif hide_count:
-                    chaos_lines.append("👥 **Chaos Game — Player Count Hidden**")
-                    chaos_lines.append("*You know your role. You do not know how many are playing.*")
-                    chaos_lines.append("*The size of the village is yours to discover.*")
-                await vc_announce.send("\n".join(chaos_lines))
+                    await vc_announce.send(
+                        "👥 **Chaos Game — Player Count Hidden**\n"
+                        "*You know your role. You do not know how many are playing.*\n"
+                        "*The size of the village is yours to discover.*")
 
         # ── Post and pin the mod dashboard ───────────────────────────────
         invalidate_cache(interaction.guild_id)
@@ -11201,10 +11648,11 @@ async def game_snapshot(interaction: discord.Interaction):
             for r in team_rows
         ) or "*None*"
 
-    embed.add_field(name=f"🏘️ Village ({len(village_a)})", value=team_list(village_a), inline=True)
-    embed.add_field(name=f"🐺 Wolf ({len(wolf_a)})",    value=team_list(wolf_a),    inline=True)
+    t_av = get_theme_labels(interaction.guild_id)
+    embed.add_field(name=f"{t_av['village_icon']} {t_av['village']} ({len(village_a)})", value=team_list(village_a), inline=True)
+    embed.add_field(name=f"{t_av['wolf_icon']} {t_av['wolf']} ({len(wolf_a)})",          value=team_list(wolf_a),    inline=True)
     if neutral_a:
-        embed.add_field(name=f"⚖️ Neutral ({len(neutral_a)})", value=team_list(neutral_a), inline=True)
+        embed.add_field(name=f"{t_av['neutral_icon']} {t_av['neutral']} ({len(neutral_a)})", value=team_list(neutral_a), inline=True)
 
     # ── Dead players ──────────────────────────────────────────────────────
     if dead:
@@ -12507,10 +12955,29 @@ async def check_win_condition(guild):
     return None
 
 async def announce_win(guild, winner: str):
-    state = cached_get_state(guild.id)
-    cat   = guild.get_channel(state.get("category_id") or 0)
-    skip  = {state.get("mod_log_channel_id"), state.get("wolf_channel_id"),
-             state.get("ghost_channel_id")}
+    state    = cached_get_state(guild.id)
+    disney   = bool(state.get("disney_mode", 0))
+    hp       = bool(state.get("hp_mode", 0))
+    cat      = guild.get_channel(state.get("category_id") or 0)
+    skip     = {state.get("mod_log_channel_id"), state.get("wolf_channel_id"),
+                state.get("ghost_channel_id")}
+
+    # Theme-aware team names and setting
+    if disney:
+        village_team = "Heroes"
+        wolf_team    = "Villains"
+        setting      = "the Enchanted Kingdom"
+        neutral_team = "Enchanted"
+    elif hp:
+        village_team = "Order of the Phoenix"
+        wolf_team    = "Death Eaters"
+        setting      = "the Wizarding World"
+        neutral_team = "Unaligned"
+    else:
+        village_team = "Village"
+        wolf_team    = "Wolves"
+        setting      = "Whisperfall"
+        neutral_team = "Neutral"
 
     # Check neutral winners at game end
     rows = db_get_assignments(guild.id)
@@ -12527,27 +12994,42 @@ async def announce_win(guild, winner: str):
         wraith_names = winner.split("|", 1)[1]
         vc_ch = guild.get_channel(state.get("village_chat_ch_id") or 0)
         if vc_ch:
-            embed = discord.Embed(
-                title       = "👻 The Wraiths Win",
-                description = (
+            if hp:
+                title = "🌑 The Dementors Win"
+                desc  = (
+                    f"*Something was watching the Wizarding World from the beginning.*\n"
+                    f"*Not the Death Eaters. Not the Order. Something far older.*\n\n"
+                    f"**{wraith_names}** — the Dementors — have achieved their purpose.\n\n"
+                    f"*They were never here to save anyone.*"
+                )
+            elif disney:
+                title = "👻 The Shadow Wins"
+                desc  = (
+                    f"*Something was watching the Enchanted Kingdom from the beginning.*\n"
+                    f"*Not the Villains. Not the Heroes. Something far darker.*\n\n"
+                    f"**{wraith_names}** have achieved their purpose.\n\n"
+                    f"*They were never here to save anyone.*"
+                )
+            else:
+                title = "👻 The Wraiths Win"
+                desc  = (
                     f"*Something was watching Whisperfall from the beginning.*\n"
                     f"*Not the wolves. Not the village. Something else entirely.*\n\n"
                     f"**{wraith_names}** — the Wraiths — have achieved their purpose.\n\n"
                     f"*They were never here to save anyone.*"
-                ),
-                color = 0x4B0082
-            )
+                )
+            embed = discord.Embed(title=title, description=desc, color=0x4B0082)
             await vc_ch.send(embed=embed)
         return
 
     if winner == "village":
-        public_msg  = "🎉 **The Village wins!** All wolves eliminated!"
-        winner_msg  = "🎉 **Your team won!** The village has triumphed — all wolves are dead."
-        loser_msg   = "💀 **Your team lost.** The village hunted down every wolf."
+        public_msg  = f"🎉 **The {village_team} win!** All {wolf_team.lower()} eliminated!"
+        winner_msg  = f"🎉 **Your team won!** The {village_team} has triumphed."
+        loser_msg   = f"💀 **Your team lost.** The {village_team} hunted down every {wolf_team[:-1].lower() if wolf_team.endswith('s') else wolf_team.lower()}."
     elif winner == "wolf":
-        public_msg  = "🐺 **The Wolves win!** They now control the village..."
-        winner_msg  = "🐺 **Your team won!** The wolves now control the village."
-        loser_msg   = "💀 **Your team lost.** The wolves have taken over."
+        public_msg  = f"🐺 **The {wolf_team} win!** They now control {setting}..."
+        winner_msg  = f"🐺 **Your team won!** The {wolf_team} now control {setting}."
+        loser_msg   = f"💀 **Your team lost.** The {wolf_team} have taken over."
     else:
         public_msg  = f"⚖️ **{winner.capitalize()} wins!**"
         winner_msg  = f"⚖️ **Your team won!** {winner.capitalize()} is victorious."
@@ -12555,22 +13037,45 @@ async def announce_win(guild, winner: str):
 
     if neutral_winners:
         neutral_lines = ", ".join(f"**{n}** ({r})" for n, r in neutral_winners)
-        public_msg += f"\n⚖️ **Neutral winners:** {neutral_lines}"
+        public_msg += f"\n⚖️ **{neutral_team} winners:** {neutral_lines}"
 
-    # Post to village chat with Whisperfall-toned message
+    # Post to village chat with themed win message
     state2   = cached_get_state(guild.id)
     vc_ch    = guild.get_channel(state2.get("village_chat_ch_id") or 0)
 
-    VILLAGE_WIN_MESSAGES = [
-        "*The bells rang this morning for the first time in what felt like years. Whisperfall is still standing.*",
-        "*By dawn, the last shadow had been lifted. The village breathes differently now — lighter, cautious still, but lighter.*",
-        "*It is over. The dark that moved through these streets does so no more. Whisperfall endures.*",
-    ]
-    WOLF_WIN_MESSAGES = [
-        "*The village believed it had seen the worst. It had not. By morning, the count was settled. The darkness won.*",
-        "*Whisperfall is quiet now. The kind of quiet that means something has been decided, and not in the village's favour.*",
-        "*The last voice that might have stopped it is gone. Whisperfall belongs to the night now.*",
-    ]
+    if disney:
+        VILLAGE_WIN_MESSAGES = [
+            "*The Kingdom is safe. The darkness has been driven from the Enchanted Village at last.*",
+            "*By dawn, every shadow had been lifted. The Heroes stand. The Kingdom endures.*",
+            "*It is over. The Villains are gone. Light has returned to the Enchanted Kingdom.*",
+        ]
+        WOLF_WIN_MESSAGES = [
+            "*The Kingdom has fallen. Darkness claimed what the Heroes could not protect.*",
+            "*The Enchanted Village is quiet now. The Villains have won the day.*",
+            "*The last Hero has fallen. The Kingdom belongs to the darkness now.*",
+        ]
+    elif hp:
+        VILLAGE_WIN_MESSAGES = [
+            "*The Dark Lord's servants have been found. The Wizarding World can breathe again.*",
+            "*By dawn, the last Death Eater had been unmasked. The Order of the Phoenix stands victorious.*",
+            "*It is over. Voldemort's reach has been cut short. Hogwarts endures.*",
+        ]
+        WOLF_WIN_MESSAGES = [
+            "*The Order believed it had seen the worst. It had not. The Death Eaters have won.*",
+            "*The Wizarding World is quiet now. The kind of quiet that means the Dark Lord has prevailed.*",
+            "*The last wand that might have stopped them is still. The Wizarding World belongs to the dark now.*",
+        ]
+    else:
+        VILLAGE_WIN_MESSAGES = [
+            "*The bells rang this morning for the first time in what felt like years. Whisperfall is still standing.*",
+            "*By dawn, the last shadow had been lifted. The village breathes differently now — lighter, cautious still, but lighter.*",
+            "*It is over. The dark that moved through these streets does so no more. Whisperfall endures.*",
+        ]
+        WOLF_WIN_MESSAGES = [
+            "*The village believed it had seen the worst. It had not. By morning, the count was settled. The darkness won.*",
+            "*Whisperfall is quiet now. The kind of quiet that means something has been decided, and not in the village's favour.*",
+            "*The last voice that might have stopped it is gone. Whisperfall belongs to the night now.*",
+        ]
 
     if winner == "village":
         tone_msg = random.choice(VILLAGE_WIN_MESSAGES)
@@ -18305,9 +18810,10 @@ async def modcheck(interaction: discord.Interaction, full: bool = False):
     embed = discord.Embed(title="📋 Mod Check", color=0xF39C12)
     embed.add_field(name="Phase",      value=f"{phase} {night_num}", inline=True)
     embed.add_field(name="Alive",      value=str(len(alive)),        inline=True)
-    embed.add_field(name="🏘️ Village", value=str(village_c),         inline=True)
-    embed.add_field(name="🐺 Wolves",  value=str(wolf_c),            inline=True)
-    embed.add_field(name="⚖️ Neutral", value=str(neutral_c),         inline=True)
+    t_mc = get_theme_labels(interaction.guild_id)
+    embed.add_field(name=f"{t_mc['village_icon']} {t_mc['village']}", value=str(village_c),  inline=True)
+    embed.add_field(name=f"{t_mc['wolf_icon']} {t_mc['wolf']}",       value=str(wolf_c),     inline=True)
+    embed.add_field(name=f"{t_mc['neutral_icon']} {t_mc['neutral']}", value=str(neutral_c),  inline=True)
     if phase == "Night":
         embed.add_field(name="Actions In", value=str(acted), inline=True)
     if frenzy_active:
