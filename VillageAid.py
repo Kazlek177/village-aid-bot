@@ -8354,35 +8354,6 @@ def build_role_card(player: discord.Member, role_name: str, role_info: dict,
                 "\u001b[0m```"
             )
             flavor = "*The village is counting on you. Root out the wolves before it is too late.*"
-
-    if disney and disney_name:
-        styled_name = apply_font(disney_name.upper(), font_style)
-        title = f"🏰  {styled_name}"
-    else:
-        styled_name = apply_font(role_name.upper(), font_style)
-        title = f"🎭  {styled_name}"
-
-    embed = discord.Embed(title=title, color=color)
-    embed.add_field(name="​", value=team_banner, inline=False)
-
-    # Show original role name in Disney mode so players know the mechanics
-    if disney and disney_name:
-        embed.add_field(
-            name  = "🎭 Original Role",
-            value = f"*{role_name}*",
-            inline= False
-        )
-
-    embed.add_field(
-        name="📜 Your Ability",
-        value=role_info.get("description") or "*No description provided.*",
-        inline=False
-    )
-    embed.add_field(name="​", value=flavor, inline=False)
-    embed.set_footer(
-        text=f"{team_label}  ·  {player.display_name}  ·  This channel is private — only you and the mod can see it."
-    )
-    # Set role image if one exists for this role
     img_url = ROLE_IMAGES.get(role_name)
     if img_url:
         embed.set_image(url=img_url)
