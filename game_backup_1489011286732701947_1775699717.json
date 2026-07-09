@@ -1,0 +1,84 @@
+{
+  "timestamp": 1775699717,
+  "guild_id": "1489011286732701947",
+  "state": {
+    "guild_id": "1489011286732701947",
+    "phase": "night",
+    "night_duration": "36000",
+    "day_duration": "50400",
+    "category_id": "1491617342231416832",
+    "wolf_channel_id": "1491617357607469157",
+    "wolf_vote_channel_id": "None",
+    "ghost_channel_id": "1491617358597591262",
+    "mod_log_channel_id": "1491617343539777587",
+    "wheel_channel_id": "1491617356294787093",
+    "player_list_ch_id": "1491617344722567268",
+    "role_list_ch_id": "1491617345494323250",
+    "day_vote_ch_id": "1491617346350219334",
+    "timeline_ch_id": "1491617353719484588",
+    "stats_ch_id": "1491617355300606013",
+    "player_list_msg_id": "1491617399315894306",
+    "role_list_msg_id": "1491617402973065226",
+    "day_vote_msg_id": "1491617404264906914",
+    "wolf_vote_msg_id": "None",
+    "timeline_msg_id": "1491617405137453261",
+    "mod_role_id": "1489055763115544617",
+    "participant_role_id": "1489055864773021788",
+    "dead_role_id": "1489055924084674623",
+    "spectator_role_id": "1489055922767663214",
+    "day_vote_end_time": "None",
+    "font_style": "default",
+    "jafar_last_role": "",
+    "traitor_switched": "0",
+    "win_tracker_ch_id": "1491617359490973825",
+    "anon_vote": "0",
+    "village_chat_ch_id": "1491617360417788026",
+    "agitator_frenzy_day": "None",
+    "agitator_elim_count": "0",
+    "night_end_time": "None",
+    "bb_channel_id": "1491617356294787093",
+    "votes_per_player": "1",
+    "werekitten_silenced_night": "0",
+    "_pending_elim_reason": "None",
+    "_pending_elim_day": "0"
+  },
+  "assignments": [
+    [
+      "344614612408467457",
+      "Villager",
+      "1",
+      "1491617367304835072"
+    ],
+    [
+      "422127595740594176",
+      "Villager",
+      "1",
+      "1491617371830353983"
+    ],
+    [
+      "1471203883404623935",
+      "Wolf",
+      "1",
+      "1491617377253724390"
+    ],
+    [
+      "1482424963020623934",
+      "Villager",
+      "1",
+      "1491617382966497330"
+    ],
+    [
+      "1489676183661445240",
+      "Villager",
+      "1",
+      "1491617387764777072"
+    ]
+  ],
+  "log": [
+    [
+      "1775699703",
+      "Night 1",
+      "\ud83c\udfae Game started \u2014 Night 1 begins"
+    ]
+  ]
+}

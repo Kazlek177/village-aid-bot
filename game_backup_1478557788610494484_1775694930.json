@@ -1,0 +1,260 @@
+{
+  "timestamp": 1775694930,
+  "guild_id": 1478557788610494484,
+  "state": {
+    "guild_id": 1478557788610494484,
+    "phase": "day",
+    "night_duration": 36000,
+    "day_duration": 50400,
+    "category_id": 1490469088236011670,
+    "wolf_channel_id": 1490469099921342537,
+    "wolf_vote_channel_id": null,
+    "ghost_channel_id": 1490469102899302601,
+    "mod_log_channel_id": 1490469089490112674,
+    "wheel_channel_id": 1490469098646278335,
+    "player_list_ch_id": 1490469090438152474,
+    "role_list_ch_id": 1490469092782510080,
+    "day_vote_ch_id": 1490469095521648752,
+    "timeline_ch_id": 1490469096675086476,
+    "stats_ch_id": 1490469097710813204,
+    "player_list_msg_id": 1490469185539543071,
+    "role_list_msg_id": 1490469190958846033,
+    "day_vote_msg_id": 1491597346612445304,
+    "wolf_vote_msg_id": null,
+    "timeline_msg_id": 1490469193492201603,
+    "mod_role_id": 1478564573975023716,
+    "participant_role_id": 1478564453187457135,
+    "dead_role_id": 1478564839759548619,
+    "spectator_role_id": null,
+    "day_vote_end_time": 1775779200,
+    "font_style": "bold_italic",
+    "jafar_last_role": "",
+    "traitor_switched": 0,
+    "win_tracker_ch_id": 1490469104371503224,
+    "anon_vote": 0,
+    "village_chat_ch_id": 1490469105277468822,
+    "agitator_frenzy_day": 5,
+    "agitator_elim_count": 0,
+    "night_end_time": 1775304000,
+    "bb_channel_id": 1490469098646278335
+  },
+  "assignments": [
+    [
+      270269261128138752,
+      "Prostitute",
+      1,
+      1490469174378631269
+    ],
+    [
+      347565963656298496,
+      "Lycan",
+      1,
+      1490469143923789834
+    ],
+    [
+      358292734962040842,
+      "Governor",
+      0,
+      1490469179936084110
+    ],
+    [
+      423207064437784609,
+      "Doctor",
+      0,
+      1490469156313632948
+    ],
+    [
+      491236416538542093,
+      "Diseased",
+      1,
+      1490469129507967108
+    ],
+    [
+      552280415407177730,
+      "Bloodletter",
+      1,
+      1490469134792659014
+    ],
+    [
+      625076010240704522,
+      "Alpha",
+      1,
+      1490469151901356192
+    ],
+    [
+      683157933177176064,
+      "Governor",
+      1,
+      1490469165356814446
+    ],
+    [
+      692568003547758643,
+      "Crazed Wolf",
+      1,
+      1490469121115029794
+    ],
+    [
+      696022048618709002,
+      "Cupid",
+      1,
+      1490469114907590830
+    ],
+    [
+      760539212415107082,
+      "Bloodletter",
+      1,
+      1490469138689298594
+    ],
+    [
+      1128151280100069406,
+      "Agitator",
+      1,
+      1490469125678567617
+    ],
+    [
+      1145751467517550702,
+      "Shadow Wolf",
+      0,
+      1490469148566884473
+    ],
+    [
+      1272217995078271009,
+      "White Wolf",
+      0,
+      1490469170041852125
+    ],
+    [
+      1471203883404623935,
+      "Elder",
+      1,
+      1490469161023832196
+    ]
+  ],
+  "log": [
+    [
+      "1775256568",
+      "Night 1",
+      "\ud83c\udfae Game started \u2014 Night 1 begins"
+    ],
+    [
+      "1775256947",
+      "Night 1",
+      "\ud83c\udf19 Night 1 began (600 min timer)"
+    ],
+    [
+      "1775256984",
+      "Night 1",
+      "\ud83c\udf19 Night 1 began (783 min timer)"
+    ],
+    [
+      "1775304001",
+      "Day 1",
+      "\u2600\ufe0f Day 1 begins \u2014 Night 1 resolved"
+    ],
+    [
+      "1775347211",
+      "Day",
+      "\ud83d\udc80 **\u2665\u2660\ud83c\udccf \u5342-\u24c3\u3116\u2202 \ud83c\udccf\u2663\u2666** eliminated \u2014 missed vote"
+    ],
+    [
+      "1775347330",
+      "Day",
+      "\ud83d\udc80 **N\u04bd\u027e\u0503\u03b9L\u03b9\u0188\u03b9\u03c3\u03c5\u0282L\u03c3\u028b\u04bd** eliminated \u2014 Moderator decision"
+    ],
+    [
+      "1775347399",
+      "Day",
+      "\ud83d\udc80 **Q\u00fa\u00ed\u0272\u014b** eliminated \u2014 Moderator decision"
+    ],
+    [
+      "1775347742",
+      "Day 1",
+      "\u2600\ufe0f Day 1 begins \u2014 Night 1 resolved"
+    ],
+    [
+      "1775347804",
+      "Night 2",
+      "\ud83c\udf19 Night 2 began (600 min timer)"
+    ],
+    [
+      "1775387189",
+      "Day",
+      "\ud83d\uddf3\ufe0f Day vote opened"
+    ],
+    [
+      "1775404866",
+      "Day",
+      "\ud83d\uddf3\ufe0f Day vote opened"
+    ],
+    [
+      "1775404977",
+      "Day 2",
+      "\u2600\ufe0f Day 2 begins \u2014 Night 2 resolved"
+    ],
+    [
+      "1775425948",
+      "Night 1",
+      "\ud83c\udfae Game started \u2014 Night 1 begins"
+    ],
+    [
+      "1775425986",
+      "Night 3",
+      "\ud83c\udf19 Night 3 began (600 min timer)"
+    ],
+    [
+      "1775475842",
+      "Night 3",
+      "\ud83c\udf19 Night 3 resolved \u2014 awaiting mod day start"
+    ],
+    [
+      "1775475861",
+      "Day 3",
+      "\u2600\ufe0f Day 3 started \u2014 vote opened"
+    ],
+    [
+      "1775520005",
+      "Day",
+      "\ud83d\udc80 **Prism** eliminated \u2014 missed vote"
+    ],
+    [
+      "1775520015",
+      "Day",
+      "\ud83d\udc80 **Playbayoinky** eliminated \u2014 missed vote"
+    ],
+    [
+      "1775520098",
+      "Night 4",
+      "\ud83c\udf19 Night 4 began (600 min timer)"
+    ],
+    [
+      "1775562589",
+      "Day 4",
+      "\u2600\ufe0f Day 4 begins \u2014 Night 4 resolved"
+    ],
+    [
+      "1775607282",
+      "Day",
+      "\ud83d\udc80 **Miss R\u025b\u0263\u025bs** eliminated \u2014 Moderator decision"
+    ],
+    [
+      "1775607300",
+      "Day",
+      "\ud83d\udc80 **\u0141\u00c3\ud835\udcff\u24ba\u0147\u24b9\u03ad\u0158** eliminated \u2014 Moderator decision"
+    ],
+    [
+      "1775607334",
+      "Night 5",
+      "\ud83c\udf19 Night 5 began (600 min timer)"
+    ],
+    [
+      "1775609427",
+      "End",
+      "\ud83c\udfc6 **Wolf** declared winners. Winners: Chooch780, Q\u00fa\u00ed\u0272\u014b, \ud83e\udd8b\ud83d\udc51 \ud835\udcab\ud835\udcc7\ud835\udcbe\ud835\udcc3\ud835\udcb8\ud835\udc52\ud835\udcc8\ud835\udcc8/\ud835\udca6\ud835\udcab \ud83d\udc51\ud83e\udd8b, \u272e \u22c6\uff61\u00b0\u2729SUNNY \u272e \u22c6\uff61\u00b0\u2729, \u0141\u00c3\ud835\udcff\u24ba\u0147\u24b9\u03ad\u0158"
+    ],
+    [
+      "1775694919",
+      "Day 5",
+      "\u2600\ufe0f Day 5 begins \u2014 Night 5 resolved"
+    ]
+  ]
+}

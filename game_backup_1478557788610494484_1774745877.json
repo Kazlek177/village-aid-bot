@@ -1,0 +1,73 @@
+{
+  "timestamp": 1774745877,
+  "guild_id": 1478557788610494484,
+  "state": {
+    "guild_id": 1478557788610494484,
+    "phase": "night",
+    "night_duration": 36000,
+    "day_duration": 50400,
+    "category_id": 1487606402238120058,
+    "wolf_channel_id": 1487606414015860909,
+    "wolf_vote_channel_id": null,
+    "ghost_channel_id": 1487606415005712606,
+    "mod_log_channel_id": 1487606403173584947,
+    "wheel_channel_id": 1487606412476547377,
+    "player_list_ch_id": 1487606404482207889,
+    "role_list_ch_id": 1487606407015698565,
+    "day_vote_ch_id": 1487606408097824918,
+    "timeline_ch_id": 1487606409725214742,
+    "stats_ch_id": 1487606411188764855,
+    "player_list_msg_id": 1487606432193974303,
+    "role_list_msg_id": 1487606433527890122,
+    "day_vote_msg_id": 1487606434626666566,
+    "wolf_vote_msg_id": null,
+    "timeline_msg_id": 1487606435679305910,
+    "mod_role_id": 1478564573975023716,
+    "participant_role_id": 1478564453187457135,
+    "dead_role_id": 1478564839759548619,
+    "spectator_role_id": null,
+    "day_vote_end_time": null,
+    "font_style": "default",
+    "jafar_last_role": "",
+    "traitor_switched": 0,
+    "win_tracker_ch_id": 1487606415974600927,
+    "anon_vote": 0,
+    "village_chat_ch_id": 1482889389519409202,
+    "agitator_frenzy_day": null,
+    "agitator_elim_count": 0,
+    "night_end_time": null,
+    "bb_channel_id": null
+  },
+  "assignments": [
+    [
+      760539212415107082,
+      "Villager",
+      1,
+      1487606417522167828
+    ],
+    [
+      962903384648724530,
+      "Wolf",
+      1,
+      1487606426431127704
+    ],
+    [
+      1471203883404623935,
+      "Villager",
+      1,
+      1487606422069055498
+    ]
+  ],
+  "log": [
+    [
+      "1774743413",
+      "Night 1",
+      "\ud83c\udfae Game started \u2014 Night 1 begins"
+    ],
+    [
+      "1774743448",
+      "Night 1",
+      "\ud83c\udf19 Night 1 began (600 min timer)"
+    ]
+  ]
+}
