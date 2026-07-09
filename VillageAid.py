@@ -8411,6 +8411,8 @@ DISNEY_ROLE_MAP = {
     "Warlock":         ("Yen Sid",            "neutral"),
     "Fairy Elf":       ("Tinker Bell",        "neutral"),
     "Wraith":          ("Headless Horseman",  "neutral"),
+    "Diseased":        ("Tarzan",             "village"),
+    "Flirt":           ("Megara",             "village"),
 }
 
 # Disney channel name overrides
@@ -8595,6 +8597,8 @@ HP_ROLE_MAP = {
     "Warlock":   ("Gilderoy Lockhart", "neutral"),
     "Fairy Elf": ("Dobby (Free Elf)",  "neutral"),
     "Wraith":    ("Dementors",         "neutral"),
+    "Diseased":  ("Argus Filch",       "village"),
+    "Flirt":     ("Madam Rosmerta",    "village"),
 }
 
 HP_CHANNEL_NAMES = {
