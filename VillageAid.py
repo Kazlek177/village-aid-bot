@@ -740,7 +740,7 @@ DEFAULT_ROLES = [
      "Elite Alpha and Blessed Wolf appear as good. Cannot explicitly tell anyone what they learned or they die."),
     ("Pothead",         "village", 1,
      "If eaten by the wolves, they get the munchies — giving the wolves a second kill that night."),
-    ("Prostitute",      "village", 1,
+    ("Flirt",      "village", 1,
      "Can ONLY communicate via sexual innuendo, gifs, emojis, or suggestive words. "
      "If caught being pure even once, contracts a horrendous STD and dies."),
     ("Seer",            "village", 1,
@@ -1878,7 +1878,7 @@ NIGHT_ABILITY_ROLES = {
 # Roles that get no status buttons — just the night message
 NIGHT_NO_BUTTON_ROLES = {
     "Villager", "Diseased", "Drunk", "Lycan", "Mayor", "Pothead",
-    "Prostitute", "Time Lord", "Traitor", "Village Idiot", "Village Jokester",
+    "Flirt", "Time Lord", "Traitor", "Village Idiot", "Village Jokester",
     "Virgin", "Blessed Wolf", "Fairy Elf", "Warlock",
     "Sheriff",    # Passive — kills Alpha on turn attempt, no active button
     "Wolf",       # Coordinates in den — no private channel action
@@ -1899,7 +1899,7 @@ NIGHT_NO_BUTTON_ROLES = {
 # Roles that skip night (no active ability — just wait)
 NIGHT_PASSIVE_ROLES = {
     "Villager", "Village Idiot", "Village Jokester", "Drunk",
-    "Prostitute", "Virgin", "Pothead", "Diseased", "Elder",
+    "Flirt", "Virgin", "Pothead", "Diseased", "Elder",
     "Mayor", "Time Lord", "Lycan", "Traitor", "Jafar",
     "Wolf", "Blessed Wolf", "White Wolf",  # White Wolf handled separately
 }
@@ -2324,7 +2324,7 @@ BB_ROLE_HINTS = {
         "killed":    "Whisperfall is quieter this morning in a way that is hard to explain.\n\nNot the quieter of safety. The quieter of something missing that used to interrupt the silence — that refused to let the weight of the game swallow the people playing it.\n\n**Alive: {alive} remain**",
         "voted_out": "The square removed its levity today.\n\nThe accused had a talent for puncturing the solemnity of a game that takes itself very seriously.\n\n**Alive: {alive} remain**",
     },
-    "Prostitute": {
+    "Flirt": {
         "killed":    "A particular kind of interference has been removed from the board.\n\nSomething that moved between Whisperfall's nights and its people — occupying attention, redirecting purpose — will not move that way again.\n\n**Alive: {alive} remain**",
         "voted_out": "The village removed a disruptive presence today.\n\nThe accused had a talent for occupying the right space at the wrong time — or the wrong space at the right time.\n\n**Alive: {alive} remain**",
         "ability":   "Someone in Whisperfall found their night occupied by an unexpected visitor.\n\nWhatever they had intended to do was not done. Their purpose was redirected by something closer and more immediate.\n\n**Alive: {alive} remain**",
@@ -4446,7 +4446,8 @@ class ModDashboardView(View):
         if phase == "night":
             # Resolve Night button
             if not night_resolved:
-                btn = Button(label="⏩ Resolve Night", style=discord.ButtonStyle.green)
+                btn = Button(label="⏩ Resolve Night", style=discord.ButtonStyle.green,
+                             custom_id=f"md_resolve_{self.guild_id}")
                 btn.callback = self._on_resolve
                 self.add_item(btn)
 
@@ -4454,36 +4455,42 @@ class ModDashboardView(View):
             elif has_invest and not invest_done:
                 if has_turn and pend_turns > 0:
                     btn = Button(
-                        label  = f"⚠️ Deliver Investigations ({pend_turns} turn(s) unconfirmed)",
-                        style  = discord.ButtonStyle.danger)
+                        label     = f"⚠️ Deliver Investigations ({pend_turns} turn(s) unconfirmed)",
+                        style     = discord.ButtonStyle.danger,
+                        custom_id = f"md_deliver_{self.guild_id}")
                 else:
                     btn = Button(
-                        label  = "📬 Deliver Investigations",
-                        style  = discord.ButtonStyle.blurple)
+                        label     = "📬 Deliver Investigations",
+                        style     = discord.ButtonStyle.blurple,
+                        custom_id = f"md_deliver_{self.guild_id}")
                 btn.callback = self._on_deliver
                 self.add_item(btn)
 
             # Start Day button (after BB posted)
             elif night_bb_done and phase == "night":
-                btn = Button(label="☀️ Start Day", style=discord.ButtonStyle.green)
+                btn = Button(label="☀️ Start Day", style=discord.ButtonStyle.green,
+                             custom_id=f"md_startday_{self.guild_id}")
                 btn.callback = self._on_start_day
                 self.add_item(btn)
 
         else:
             # Close Vote button
             if not vote_closed and phase == "day":
-                btn = Button(label="🗳️ Close Vote", style=discord.ButtonStyle.blurple)
+                btn = Button(label="🗳️ Close Vote", style=discord.ButtonStyle.blurple,
+                             custom_id=f"md_closevote_{self.guild_id}")
                 btn.callback = self._on_close_vote
                 self.add_item(btn)
 
             # Start Night button (after day BB posted)
             elif day_bb_done:
-                btn = Button(label="🌙 Start Night", style=discord.ButtonStyle.green)
+                btn = Button(label="🌙 Start Night", style=discord.ButtonStyle.green,
+                             custom_id=f"md_startnight_{self.guild_id}")
                 btn.callback = self._on_start_night
                 self.add_item(btn)
 
         # Always show a Refresh button
-        refresh_btn = Button(label="🔄 Refresh", style=discord.ButtonStyle.secondary, row=1)
+        refresh_btn = Button(label="🔄 Refresh", style=discord.ButtonStyle.secondary,
+                             row=1, custom_id=f"md_refresh_{self.guild_id}")
         refresh_btn.callback = self._on_refresh
         self.add_item(refresh_btn)
 
@@ -6599,11 +6606,13 @@ class VoteResultsView(View):
         self.guild_id  = guild_id
         self.night_num = night_num
 
-        view_btn = Button(label="📊 View Day's Vote Results", style=discord.ButtonStyle.secondary)
+        view_btn = Button(label="📊 View Day's Vote Results", style=discord.ButtonStyle.secondary,
+                          custom_id=f"vr_view_{guild_id}_{night_num}")
         view_btn.callback = self.on_view
         self.add_item(view_btn)
 
-        hist_btn = Button(label="📜 Browse All Days", style=discord.ButtonStyle.grey)
+        hist_btn = Button(label="📜 Browse All Days", style=discord.ButtonStyle.grey,
+                          custom_id=f"vr_browse_{guild_id}_{night_num}")
         hist_btn.callback = self.on_browse
         self.add_item(hist_btn)
 
@@ -7273,7 +7282,7 @@ SPEECH_RULES = {
         "warning": "🍺 **Drunk warning** — you can only send memes, gifs, and emojis. No text allowed.",
         "final":   "🍺 **Final warning** — one more text message and the mods will be notified for elimination.",
     },
-    "Prostitute": {
+    "Flirt": {
         "rule":    "can only communicate via sexual innuendo, gifs, emojis, or suggestive words",
         "check":   lambda text: _has_real_words(text) and not any(
             w in text.lower() for w in [
@@ -7281,7 +7290,7 @@ SPEECH_RULES = {
                 "kiss","oh my","goodness","tempt","desire","tease","seduce",
                 "lusty","steamy","spicy","flirt","gorgeous","delicious"
             ]),
-        "warning": "💋 **Prostitute warning** — you must speak only in innuendo and suggestive language.",
+        "warning": "💋 **Flirt warning** — you must speak only in innuendo and suggestive language.",
         "final":   "💋 **Final warning** — one more clean message and the mods will be notified for elimination.",
     },
     "Village Idiot": {
@@ -8373,6 +8382,10 @@ def build_role_card(player: discord.Member, role_name: str, role_info: dict,
     embed.set_footer(
         text=f"{team_label}  ·  {player.display_name}  ·  This channel is private — only you and the mod can see it."
     )
+    # Set role image if one exists for this role
+    img_url = ROLE_IMAGES.get(role_name)
+    if img_url:
+        embed.set_image(url=img_url)
     return embed
 
 
@@ -8412,7 +8425,7 @@ DISNEY_ROLE_MAP = {
     "Shapeshifter":    ("Merida",             "village"),
     "Drunk":           ("Flounder",           "village"),
     "Pothead":         ("Baloo",              "village"),
-    "Prostitute":      ("Megara",             "village"),
+    "Flirt":      ("Megara",             "village"),
     "Jafar":           ("Pascal",             "village"),
     "Lycan":           ("The Beast",          "village"),
     "Time Lord":       ("Mad Hatter",         "village"),
@@ -8452,6 +8465,55 @@ DISNEY_TEAMS = {
     "wolf":    "Villains",
     "village": "Heroes",
     "neutral": "Enchanted",
+}
+
+ROLE_IMAGES = {
+    "Agitator":        "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/agitator.png",
+    "Alpha":           "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/alpha.png",
+    "Blessed Wolf":    "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/blessed-wolf.png",
+    "Bloodhound":      "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/bloodhound.png",
+    "Bloodletter":     "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/bloodletter.png",
+    "Clone":           "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/clone.png",
+    "Crazed Wolf":     "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/crazed-wolf.png",
+    "Cupid":           "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/cupid.png",
+    "Dire Wolf":       "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/dire-wolf.png",
+    "Diseased":        "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/diseased.png",
+    "Doctor":          "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/doctor.png",
+    "Drunk":           "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/drunk.png",
+    "Echo-Stalker":    "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/echo-stalker.png",
+    "Elder":           "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/elder.png",
+    "Elite Alpha":     "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/elite-alpha.png",
+    "Fairy Elf":       "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/fairy-elf.png",
+    "Flirt":           "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/flirt.png",
+    "Governor":        "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/governor.png",
+    "Gravedigger":     "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/gravedigger.png",
+    "Hermit":          "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/hermit.png",
+    "Huntsman":        "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/huntsman.png",
+    "Insomniac":       "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/insomniac.png",
+    "Jafar":           "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/jafar.png",
+    "Lycan":           "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/lycan.png",
+    "Mayor":           "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/mayor.png",
+    "Medium":          "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/medium.png",
+    "Oracle":          "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/oracle.png",
+    "Pothead":         "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/pothead.png",
+    "Seer":            "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/seer.png",
+    "Shadow Wolf":     "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/shadow-wolf.png",
+    "Shapeshifter":    "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/shapeshifter.png",
+    "Sheriff":         "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/sheriff.png",
+    "Surgeon":         "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/surgeon.png",
+    "Time Lord":       "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/time-lord.png",
+    "Traitor":         "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/traitor.png",
+    "Village Idiot":   "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/village-idiot.png",
+    "Village Jokester":"https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/village-jokester.png",
+    "Villager":        "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/villager.png",
+    "Virgin":          "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/virgin.png",
+    "Warlock":         "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/warlock.png",
+    "Werekitten":      "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/werekitten.png",
+    "White Wolf":      "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/white-wolf.png",
+    "Witch":           "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/witch.png",
+    "Wolf":            "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/wolf.png",
+    "Wolf Pup":        "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/wolf-pup.png",
+    "Wraith":          "https://raw.githubusercontent.com/Kazlek177/village-aid-bot/main/images/wraith.png",
 }
 
 def get_disney_role(role_name: str) -> tuple:
@@ -8547,7 +8609,7 @@ HP_ROLE_MAP = {
     "Shapeshifter":      ("Nymphadora Tonks",      "village"),
     "Drunk":             ("Seamus Finnigan",       "village"),
     "Pothead":           ("Neville Longbottom",    "village"),
-    "Prostitute":        ("Madam Rosmerta",        "village"),
+    "Flirt":        ("Madam Rosmerta",        "village"),
     "Jafar":             ("Professor Slughorn",    "village"),
     "Lycan":             ("Remus Lupin",           "village"),
     "Time Lord":         ("Hermione's Time-Turner","village"),
@@ -11247,13 +11309,13 @@ class DayVoteView(View):
         self.guild_id  = guild_id
         self.anonymous = anonymous
 
-        cast_btn      = Button(label="🗳️ Cast / Change Vote",    style=discord.ButtonStyle.blurple)
-        abstain_btn   = Button(label="🤐 Abstain",               style=discord.ButtonStyle.secondary)
-        remove_btn    = Button(label="↩️ Remove Vote",           style=discord.ButtonStyle.secondary)
-        breakdown_btn = Button(label="👁️ Full Breakdown",        style=discord.ButtonStyle.grey,
+        cast_btn      = Button(label="🗳️ Cast / Change Vote",    style=discord.ButtonStyle.blurple,    custom_id=f"dv_cast_{guild_id}")
+        abstain_btn   = Button(label="🤐 Abstain",               style=discord.ButtonStyle.secondary,  custom_id=f"dv_abstain_{guild_id}")
+        remove_btn    = Button(label="↩️ Remove Vote",           style=discord.ButtonStyle.secondary,  custom_id=f"dv_remove_{guild_id}")
+        breakdown_btn = Button(label="👁️ Full Breakdown",        style=discord.ButtonStyle.grey,       custom_id=f"dv_breakdown_{guild_id}",
                                disabled=anonymous)
-        log_btn       = Button(label="🕐 Vote Log",              style=discord.ButtonStyle.grey, row=1)
-        notvoted_btn  = Button(label="⚠️ Has Not Voted",         style=discord.ButtonStyle.red,  row=1)
+        log_btn       = Button(label="🕐 Vote Log",              style=discord.ButtonStyle.grey,       custom_id=f"dv_log_{guild_id}",       row=1)
+        notvoted_btn  = Button(label="⚠️ Has Not Voted",         style=discord.ButtonStyle.red,        custom_id=f"dv_notvoted_{guild_id}",  row=1)
         cast_btn.callback      = self.cast_vote
         abstain_btn.callback   = self.abstain
         remove_btn.callback    = self.remove_vote
@@ -12135,7 +12197,8 @@ class WolfVoteView(View):
         non_wolf = [r for r in rows if get_team(guild_id, r[1]) != "wolf"]
         if not non_wolf:
             btn = Button(label="No targets available", disabled=True,
-                         style=discord.ButtonStyle.secondary)
+                         style=discord.ButtonStyle.secondary,
+                         custom_id=f"wv_notargets_{guild_id}")
             self.add_item(btn)
             return
         npcs_wv    = db_get_npcs(guild_id)
@@ -12165,7 +12228,8 @@ class WolfVoteView(View):
                 ))
         sel = Select(
             placeholder="🐺 Choose tonight's kill target...",
-            options=options
+            options=options,
+            custom_id=f"wv_select_{guild_id}"
         )
         sel.callback = self.on_vote
         self._sel = sel
@@ -16458,8 +16522,10 @@ class NightStatusView(View):
         self.role_name = role_name
         self.night_num = night_num
 
-        use_btn  = Button(label="✅ Using my ability tonight",  style=discord.ButtonStyle.green)
-        pass_btn = Button(label="💤 Pass — no action tonight",  style=discord.ButtonStyle.secondary)
+        use_btn  = Button(label="✅ Using my ability tonight",  style=discord.ButtonStyle.green,
+                          custom_id=f"ns_use_{guild_id}_{actor_id}")
+        pass_btn = Button(label="💤 Pass — no action tonight",  style=discord.ButtonStyle.secondary,
+                          custom_id=f"ns_pass_{guild_id}_{actor_id}")
         use_btn.callback  = self.on_use
         pass_btn.callback = self.on_pass
         self.add_item(use_btn)
@@ -17158,13 +17224,14 @@ class DeliverResultsView(View):
         self.night_num = night_num
 
         if guild_id is None:
-            # Bare registration for restart recovery — buttons added minimally
-            btn = Button(label="✅ Deliver Night Results", style=discord.ButtonStyle.green)
+            # Bare registration for restart recovery
+            btn = Button(label="✅ Deliver Night Results", style=discord.ButtonStyle.green,
+                         custom_id="dr_deliver_0_0")
             btn.callback = self.on_deliver
             self.add_item(btn)
             return
 
-        # Check for pending turns — warn mod if turn hasn't been confirmed yet
+        # Check for pending turns
         conn_dv = sqlite3.connect(DB_FILE)
         c_dv    = conn_dv.cursor()
         c_dv.execute(
@@ -17175,14 +17242,15 @@ class DeliverResultsView(View):
 
         if pending:
             warn_btn = Button(
-                label  = f"⚠️ {pending} turn(s) unconfirmed — confirm via AlphaTurnConfirmView first",
-                style  = discord.ButtonStyle.danger,
-                disabled = True)
+                label    = f"⚠️ {pending} turn(s) unconfirmed — confirm via AlphaTurnConfirmView first",
+                style    = discord.ButtonStyle.danger,
+                disabled = True,
+                custom_id= f"dr_warn_{guild_id}_{night_num}")
             self.add_item(warn_btn)
 
         label = "✅ Deliver Night Results" if not pending else "⚠️ Deliver Anyway (turn may not be confirmed)"
         style = discord.ButtonStyle.green if not pending else discord.ButtonStyle.secondary
-        btn   = Button(label=label, style=style)
+        btn   = Button(label=label, style=style, custom_id=f"dr_deliver_{guild_id}_{night_num}")
         btn.callback = self.on_deliver
         self.add_item(btn)
 
@@ -17321,7 +17389,7 @@ async def _post_game_action_history(guild, guild_id: int, total_nights: int, mod
         "wraith_mark":      "👻 Wraith marked",
         "wraith_kill":      "👻 Wraith Kill Command",
         "shadow_wolf":      "🌑 Shadow Wolf targeted",
-        "prostitute":       "💃 Prostitute blocked",
+        "flirt":       "💃 Flirt blocked",
         "clone":            "🪞 Clone copied",
         "shapeshifter":     "🌀 Shapeshifter became",
         "dire_wolf":        "🐺💕 Dire Wolf bonded with",
@@ -19484,7 +19552,7 @@ def _get_role_atmosphere_hint(role_name: str) -> str:
         "Elder":           "someone old in ways that had nothing to do with age, who had survived things they never spoke of",
         "Mayor":           "someone who carried the village in their bearing, who others looked to without being asked",
         "Drunk":           "someone loose at the seams, who said things they didn't mean and meant things they didn't say",
-        "Prostitute":      "someone who moved through people like water, who knew more than they let on",
+        "Flirt":      "someone who moved through people like water, who knew more than they let on",
         "Virgin":          "someone careful, guarded, who kept themselves apart from the worst of things",
         "Pothead":         "someone easy-going, underestimated, who never seemed to be paying attention until it mattered",
         "Diseased":        "someone who carried something invisible, who seemed fine right up until they weren't",
@@ -20766,7 +20834,7 @@ async def roleinfo(interaction: discord.Interaction, role: str):
     day_ability_roles = {"Governor", "Hermit"}
     passive_roles = {
         "Villager", "Diseased", "Drunk", "Lycan", "Mayor", "Pothead",
-        "Prostitute", "Time Lord", "Traitor", "Village Idiot", "Village Jokester",
+        "Flirt", "Time Lord", "Traitor", "Village Idiot", "Village Jokester",
         "Virgin", "Blessed Wolf", "Fairy Elf", "Warlock",
         "Sheriff", "Wolf", "Insomniac", "Elder", "Gravedigger"
     }
