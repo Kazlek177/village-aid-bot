@@ -1,0 +1,89 @@
+{
+  "timestamp": 1776127790,
+  "guild_id": "1489011286732701947",
+  "state": {
+    "guild_id": "1489011286732701947",
+    "phase": "night",
+    "night_duration": "36000",
+    "day_duration": "50400",
+    "category_id": "1491946258355458098",
+    "wolf_channel_id": "1491946269223157820",
+    "wolf_vote_channel_id": "None",
+    "ghost_channel_id": "1491946270200430772",
+    "mod_log_channel_id": "1491946259596968117",
+    "wheel_channel_id": "1491946267830386829",
+    "player_list_ch_id": "1491946261081755658",
+    "role_list_ch_id": "1491946262218412063",
+    "day_vote_ch_id": "1491946263715905647",
+    "timeline_ch_id": "1491946264663822408",
+    "stats_ch_id": "1491946266249269268",
+    "player_list_msg_id": "1491946299698974792",
+    "role_list_msg_id": "1491946302848766052",
+    "day_vote_msg_id": "1491946303813587016",
+    "wolf_vote_msg_id": "None",
+    "timeline_msg_id": "1491946305218543757",
+    "mod_role_id": "1489055763115544617",
+    "participant_role_id": "1489055864773021788",
+    "dead_role_id": "1489055924084674623",
+    "spectator_role_id": "1489055922767663214",
+    "day_vote_end_time": "None",
+    "font_style": "default",
+    "jafar_last_role": "",
+    "traitor_switched": "0",
+    "win_tracker_ch_id": "1491946271055810682",
+    "anon_vote": "0",
+    "village_chat_ch_id": "1491946273052295259",
+    "agitator_frenzy_day": "None",
+    "agitator_elim_count": "0",
+    "night_end_time": "None",
+    "bb_channel_id": "1491946267830386829",
+    "votes_per_player": "1",
+    "werekitten_silenced_night": "0",
+    "_pending_elim_reason": "None",
+    "_pending_elim_day": "0"
+  },
+  "assignments": [
+    [
+      "344614612408467457",
+      "Alpha",
+      "1",
+      "1491946274432356452"
+    ],
+    [
+      "422127595740594176",
+      "Medium",
+      "1",
+      "1491946278912000121"
+    ],
+    [
+      "1471203883404623935",
+      "Seer",
+      "1",
+      "1491946286553759785"
+    ],
+    [
+      "1482424963020623934",
+      "Sheriff",
+      "1",
+      "1491946290773364876"
+    ],
+    [
+      "1489676183661445240",
+      "Doctor",
+      "1",
+      "1491946294913138688"
+    ]
+  ],
+  "log": [
+    [
+      "1775778119",
+      "Night 1",
+      "\ud83c\udfae Game started \u2014 Night 1 begins"
+    ],
+    [
+      "1775778163",
+      "Night 1",
+      "\ud83c\udf19 Night 1 began (600 min timer)"
+    ]
+  ]
+}
