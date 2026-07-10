@@ -2103,6 +2103,82 @@ BB_BUILTIN_TEMPLATES = [
      "The village fought. It investigated. It voted and argued and pointed fingers across the square with the particular desperation of people who knew the stakes. In the end, it was not enough.\n\n"
      "**The dark has won.**\n\n"
      "*Whisperfall falls silent — not with relief, but with finality.*"),
+
+    # ── Disney Theme Templates ─────────────────────────────────────────────
+    ("disney-quiet-night", "night", "quiet",
+     "The Enchanted Kingdom held its breath.\n\n"
+     "No torches were toppled. No castle gates disturbed. Whatever darkness moves through these halls chose patience over action last night — or found no Hero worth the effort.\n\n"
+     "Morning came with the same count it left with.\n\n"
+     "**Alive: {alive} remain**\n\n"
+     "*The calm is not safety. It is anticipation.*"),
+
+    ("disney-villain-kill", "night", "death",
+     "Something moved through the Enchanted Kingdom last night with purpose.\n\n"
+     "It did not choose carelessly. It chose *deliberately* — a door, a name, a light that had become inconvenient to those who prefer the shadows. By morning the deed was done.\n\n"
+     "**{name} is gone.**\n\n"
+     "**Alive: {alive} remain**\n\n"
+     "*Whatever made that choice is still here. Still watching. Still counting the Heroes that remain.*"),
+
+    ("disney-vote-elimination", "day", "vote",
+     "The Kingdom spoke today.\n\n"
+     "The arguments rang through the square the way they always do — voices rising, alliances tested, fingers pointed across the cobblestones. When the count came in, a name had risen to the top. The accused said their piece. It was not enough.\n\n"
+     "**{name} has been cast out of the Kingdom.**\n\n"
+     "**Alive: {alive} remain**\n\n"
+     "*Whether the Heroes chose wisely, only the next nightfall will answer.*"),
+
+    ("disney-double-death", "night", "death",
+     "The Enchanted Kingdom woke to two empty chairs this morning.\n\n"
+     "Two different reasons. Two different doors. The darkness does not always strike only once.\n\n"
+     "**{name} and {name2} are gone.**\n\n"
+     "**Alive: {alive} remain**\n\n"
+     "*The count falls faster now. The Villains grow bolder. The Kingdom is running out of time.*"),
+
+    ("disney-no-vote", "day", "vote",
+     "The Kingdom said nothing today.\n\n"
+     "The vote opened. The square filled. And then — silence. Whatever courage had gathered at the start of the day had dissolved into whispers and sideways glances.\n\n"
+     "No one was cast out.\n\n"
+     "**Alive: {alive} remain**\n\n"
+     "*The darkness does not need the Heroes to fail. It only needs them to hesitate.*"),
+
+    ("disney-protected", "night", "quiet",
+     "Someone kept watch last night.\n\n"
+     "A silent guardian, standing between a door and whatever darkness considered it. The consideration ended. Whatever came thought better of it — or found a protector where it expected none.\n\n"
+     "**No one fell.**\n\n"
+     "**Alive: {alive} remain**\n\n"
+     "*The magic held. The Kingdom endures — for one more morning.*"),
+
+    ("disney-turned", "night", "turn",
+     "The Enchanted Kingdom is not the same place it was yesterday.\n\n"
+     "Something shifted in the night that cannot be undone. A whisper in the dark between those who should never have been speaking. Someone who stood with the Heroes when the sun went down did not stand with them when it rose.\n\n"
+     "**The Kingdom does not yet know who has changed sides.**\n\n"
+     "**Alive: {alive} remain**\n\n"
+     "*The count has not changed. The allegiances have.*"),
+
+    ("disney-missed-votes", "day", "participation",
+     "The Kingdom does not forgive those who look away.\n\n"
+     "They were there. They had voices. When the square filled and the names were called, they remained silent. By morning, their place in the Kingdom had been revoked.\n\n"
+     "**{name} has been removed from the Enchanted Kingdom for failing to vote.**\n\n"
+     "**Alive: {alive} remain**\n\n"
+     "*Every voice matters in the fight against darkness. The Kingdom cannot afford silence.*"),
+
+    ("disney-investigation-clear", "night", "investigation",
+     "Magic moved through the Kingdom last night, searching for the shape of something wrong.\n\n"
+     "What it found was clean — brighter than feared, clearer than expected. Whatever shadow was suspected, the answer that returned was not the one the Villains would have wanted known.\n\n"
+     "**No one fell. No darkness was confirmed.**\n\n"
+     "**Alive: {alive} remain**\n\n"
+     "*Some nights the enchantment holds. Tonight was one of those nights.*"),
+
+    ("disney-game-end-heroes", "end", "victory",
+     "The story has reached its ending.\n\n"
+     "The last of what darkened the Enchanted Kingdom has been found and cast out. The square is quieter than it has been in days — not the quiet of dread, but the quiet of a Kingdom that has survived what came for it.\n\n"
+     "**The Heroes stand. The Kingdom is saved.**\n\n"
+     "*And they all lived happily ever after.*"),
+
+    ("disney-game-end-villains", "end", "victory",
+     "The story has reached its ending.\n\n"
+     "The Heroes fought. They investigated. They pointed fingers and cast votes and believed with all their hearts that good would prevail. In the end, it was not enough.\n\n"
+     "**Darkness has claimed the Enchanted Kingdom.**\n\n"
+     "*The kingdom falls silent. The Villains have won the day.*"),
 ]
 
 # ── Role-specific Blood Board hint templates ──────────────────────────────
@@ -2333,12 +2409,67 @@ BB_ROLE_HINTS = {
 
 
 def get_bb_hints_for_game(guild_id: int) -> dict:
-    """Return only role hints for roles currently in the active game."""
-    rows = db_get_assignments(guild_id)
+    """Return only role hints for roles currently in the active game.
+    In Disney mode, wraps hint bodies with kingdom-appropriate language."""
+    state    = cached_get_state(guild_id) or {}
+    disney   = bool(state.get("disney_mode", 0))
+    hp       = bool(state.get("hp_mode", 0))
+    rows     = db_get_assignments(guild_id)
+
     if not rows:
         return BB_ROLE_HINTS
+
     game_roles = {r[1] for r in rows}
-    return {role: hints for role, hints in BB_ROLE_HINTS.items() if role in game_roles}
+    hints      = {role: h for role, h in BB_ROLE_HINTS.items() if role in game_roles}
+
+    if not disney and not hp:
+        return hints
+
+    # Remap role names to themed names in hint keys
+    themed_hints = {}
+    for role, role_hints in hints.items():
+        if disney:
+            themed_name, _ = get_disney_role(role)
+        elif hp:
+            themed_name, _ = get_hp_role(role)
+        else:
+            themed_name = role
+
+        # Replace Whisperfall/village/wolf language with Kingdom/Heroes/Villains
+        new_hints = {}
+        for event, body in role_hints.items():
+            if disney:
+                body = (body
+                    .replace("Whisperfall", "the Enchanted Kingdom")
+                    .replace("the village", "the Kingdom")
+                    .replace("the Village", "the Kingdom")
+                    .replace("the wolves", "the Villains")
+                    .replace("the wolf", "the Villain")
+                    .replace("the den", "the Villain Lair")
+                    .replace("the pack", "the Villain circle")
+                    .replace("the square", "the Kingdom square")
+                    .replace("wolf ", "Villain ")
+                    .replace("Wolf ", "Villain ")
+                )
+            elif hp:
+                body = (body
+                    .replace("Whisperfall", "Hogwarts")
+                    .replace("the village", "the wizarding world")
+                    .replace("the Village", "the Wizarding World")
+                    .replace("the wolves", "the Death Eaters")
+                    .replace("the wolf", "the Death Eater")
+                    .replace("the den", "the Chamber of Secrets")
+                    .replace("the pack", "the Death Eater circle")
+                    .replace("the square", "the Great Hall")
+                    .replace("wolf ", "Death Eater ")
+                    .replace("Wolf ", "Death Eater ")
+                )
+            new_hints[event] = body
+        # Use themed name as the key so the UI shows the character name
+        display_name = f"{themed_name} ({role})" if themed_name != role else role
+        themed_hints[display_name] = new_hints
+
+    return themed_hints
 
 
 
@@ -2486,47 +2617,63 @@ def build_player_list_embed(guild, rows, log=None):
     embed.set_footer(text=f"✅ Alive: {alive_count}  •  💀 Eliminated: {dead_count}")
     return embed
 
-def build_role_list_embed(final_counts, all_roles):
+def build_role_list_embed(final_counts, all_roles, guild_id=None):
     """Build role list — returns multiple embeds if needed (Discord 6000 char limit)."""
+    # Get theme labels if applicable
+    disney = bool((cached_get_state(guild_id) or {}).get("disney_mode", 0)) if guild_id else False
+    hp     = bool((cached_get_state(guild_id) or {}).get("hp_mode", 0))     if guild_id else False
+    t      = get_theme_labels(guild_id) if guild_id else {"village": "Village", "wolf": "Wolves", "neutral": "Neutral", "village_icon": "📜", "wolf_icon": "🐺", "neutral_icon": "⚖️"}
+
     village_lines, wolf_lines, neutral_lines = [], [], []
     for role_name, count in final_counts.items():
         info  = all_roles.get(role_name, {})
         team  = info.get("team", "village")
         desc  = info.get("description") or "No description."
-        line  = f"**{role_name}**\n{desc}"
+
+        # Build display name with theme character
+        if disney:
+            themed_name, _ = get_disney_role(role_name)
+            display = f"**{themed_name}** *(as {role_name})*" if themed_name != role_name else f"**{role_name}**"
+        elif hp:
+            themed_name, _ = get_hp_role(role_name)
+            display = f"**{themed_name}** *(as {role_name})*" if themed_name != role_name else f"**{role_name}**"
+        else:
+            display = f"**{role_name}**"
+
+        line = f"{display}\n{desc}"
         if team == "wolf": wolf_lines.append(line)
         elif team == "neutral": neutral_lines.append(line)
         else: village_lines.append(line)
 
-    # Build one embed per team so descriptions aren't truncated
+    # Build one embed per team
     embeds = []
     if village_lines:
-        e = discord.Embed(title="📜 Village Roles", color=0x27AE60)
+        e = discord.Embed(title=f"{t['village_icon']} {t['village']} Roles", color=0x27AE60)
         for line in village_lines:
             parts = line.split("\n", 1)
             e.add_field(name=parts[0], value=parts[1][:1024] if len(parts) > 1 else "—", inline=False)
         embeds.append(e)
     if wolf_lines:
-        e = discord.Embed(title="🐺 Wolf Roles", color=0xC0392B)
+        e = discord.Embed(title=f"{t['wolf_icon']} {t['wolf']} Roles", color=0xC0392B)
         for line in wolf_lines:
             parts = line.split("\n", 1)
             e.add_field(name=parts[0], value=parts[1][:1024] if len(parts) > 1 else "—", inline=False)
         embeds.append(e)
     if neutral_lines:
-        e = discord.Embed(title="⚖️ Neutral Roles", color=0xF39C12)
+        e = discord.Embed(title=f"{t['neutral_icon']} {t['neutral']} Roles", color=0xF39C12)
         for line in neutral_lines:
             parts = line.split("\n", 1)
             e.add_field(name=parts[0], value=parts[1][:1024] if len(parts) > 1 else "—", inline=False)
         embeds.append(e)
 
-    # Tag footer on last embed
     if embeds:
-        embeds[-1].set_footer(text="Roles are public — who has them is secret.")
-    return embeds  # Returns list now
+        embeds[-1].set_footer(text="Roles are public — who has each role is secret.")
+    return embeds
 
-async def post_role_list_embeds(channel, final_counts, all_roles):
+
+async def post_role_list_embeds(channel, final_counts, all_roles, guild_id=None):
     """Post full role descriptions to a channel."""
-    embeds = build_role_list_embed(final_counts, all_roles)
+    embeds = build_role_list_embed(final_counts, all_roles, guild_id=guild_id)
     for embed in embeds:
         await channel.send(embed=embed)
 
@@ -2873,8 +3020,8 @@ class LobbyJoinView(View):
         super().__init__(timeout=None)
         self.guild_id    = guild_id
         self.roster_size = roster_size
-        join_btn  = Button(label="Join Game",  style=discord.ButtonStyle.green)
-        leave_btn = Button(label="Leave Game", style=discord.ButtonStyle.secondary)
+        join_btn  = Button(label="Join Game",  style=discord.ButtonStyle.green,     custom_id=f"lobby_join_{guild_id}")
+        leave_btn = Button(label="Leave Game", style=discord.ButtonStyle.secondary, custom_id=f"lobby_leave_{guild_id}")
         join_btn.callback  = self.on_join
         leave_btn.callback = self.on_leave
         self.add_item(join_btn)
@@ -3909,7 +4056,7 @@ class BloodBoardPostView(View):
         super().__init__(timeout=None)  # No timeout
         self.guild_id = guild_id
         self._embed   = embed
-        btn = Button(label="📋 Post Blood Board to Village Chat", style=discord.ButtonStyle.green)
+        btn = Button(label="📋 Post Blood Board to Village Chat", custom_id="bb_post_vc", style=discord.ButtonStyle.green)
         btn.callback = self.on_post
         self.add_item(btn)
 
@@ -9397,7 +9544,8 @@ class ConfirmStartView(View):
                 color       = 0x2C3060)
             await role_list_ch.send(embed=rl_embed)
         else:
-            await post_role_list_embeds(role_list_ch, self.final_counts, all_roles_map)
+            await post_role_list_embeds(role_list_ch, self.final_counts, all_roles_map,
+                                        guild_id=interaction.guild_id)
         rl_msg  = await role_list_ch.send("📜 *Role descriptions posted above. Who has each role is secret.*" if not hide_roles
                                           else "🎭 *Roles are hidden in this game.*")
         dv_view = DayVoteView(interaction.guild_id)
@@ -9969,8 +10117,8 @@ class ClaimChannelView(View):
         self.channel_id = channel_id
         self.owner_id   = owner_id
 
-        add_btn = Button(label="➕ Add Player", style=discord.ButtonStyle.green)
-        rem_btn = Button(label="➖ Remove Player", style=discord.ButtonStyle.danger)
+        add_btn = Button(label="➕ Add Player", style=discord.ButtonStyle.green,   custom_id=f"cc_add_{guild_id}")
+        rem_btn = Button(label="➖ Remove Player", style=discord.ButtonStyle.danger, custom_id=f"cc_rem_{guild_id}")
         add_btn.callback = self.on_add
         rem_btn.callback = self.on_remove
         self.add_item(add_btn)
@@ -14281,13 +14429,13 @@ class TrackerMainView(View):
         self.tracker_msg_id = tracker_msg_id
         self.ch_id          = ch_id
 
-        sus_btn   = Button(label="🔴 Suspicion",        style=discord.ButtonStyle.danger,    row=0)
+        sus_btn   = Button(label="🔴 Suspicion",        style=discord.ButtonStyle.danger,    custom_id=f"tr_sus_{self.guild_id}_{self.owner_id}",    row=0)
         rol_btn   = Button(label="🎭 Suspected Role",    style=discord.ButtonStyle.blurple,   row=0)
         not_btn   = Button(label="📝 Add Note",          style=discord.ButtonStyle.secondary, row=0)
         clr_btn   = Button(label="🗑️ Clear Note",       style=discord.ButtonStyle.secondary, row=0)
         ref_btn   = Button(label="🔄 Refresh",           style=discord.ButtonStyle.secondary, row=1)
         vhx_btn   = Button(label="📜 Full Vote History", style=discord.ButtonStyle.secondary, row=1)
-        shr_btn   = Button(label="📢 Share to Village",  style=discord.ButtonStyle.green,     row=1)
+        shr_btn   = Button(label="📢 Share to Village",  style=discord.ButtonStyle.green,    custom_id=f"tr_shr_{self.guild_id}_{self.owner_id}",     row=1)
 
         sus_btn.callback = self.on_suspicion
         rol_btn.callback = self.on_role
@@ -16240,7 +16388,7 @@ class DayHermitView(View):
         self._sel = sel
         self.add_item(sel)
 
-        skip_btn = Button(label="⏭️ Skip — don't use ability today", style=discord.ButtonStyle.secondary)
+        skip_btn = Button(label="⏭️ Skip — don't use ability today", custom_id=f"herm_skip_{self.hermit_id}", style=discord.ButtonStyle.secondary)
         skip_btn.callback = self.on_skip
         self.add_item(skip_btn)
 
@@ -19565,23 +19713,51 @@ async def bb_templates_cmd(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     db_seed_bb_templates(interaction.guild_id)
 
-    embed = discord.Embed(
-        title       = "📋 Blood Board Templates",
-        description = "Choose what you need:",
-        color       = 0x8B0000
-    )
+    disney = is_disney_mode(interaction.guild_id)
+    hp     = is_hp_mode(interaction.guild_id)
 
-    view = BBTemplateModeView(interaction.guild_id)
-    embed.add_field(
-        name  = "🎭 Role Hints",
-        value = "Hint-based boards for specific roles in the **current game** — killed, voted out, ability used, investigation results.",
-        inline=False
-    )
-    embed.add_field(
-        name  = "📋 General Templates",
-        value = "Saved templates for quiet nights, game endings, missed votes, and more.",
-        inline=False
-    )
+    if disney:
+        title = "🏰 Royal Decree Templates"
+        desc  = "Disney-themed blood board templates for the Enchanted Kingdom."
+        prefix = "disney-"
+    elif hp:
+        title = "⚡ Daily Prophet Templates"
+        desc  = "Harry Potter-themed blood board templates for Hogwarts."
+        prefix = "hp-"
+    else:
+        title = "📋 Blood Board Templates"
+        desc  = "Choose what you need:"
+        prefix = None
+
+    embed = discord.Embed(title=title, description=desc, color=0x8B0000)
+    view  = BBTemplateModeView(interaction.guild_id)
+
+    if disney or hp:
+        # Filter templates to themed ones
+        all_templates = db_get_bb_templates(interaction.guild_id)
+        themed = [(n, c, b, t) for n, c, b, t in all_templates
+                  if (prefix and n.startswith(prefix)) or (not prefix)]
+        by_cat = {}
+        for name, cat, body, tags in themed:
+            by_cat.setdefault(cat, []).append((name, body, tags))
+        for cat, items in sorted(by_cat.items()):
+            embed.add_field(
+                name  = f"{cat.title()} ({len(items)})",
+                value = ", ".join(f"`{n}`" for n, _, _ in items),
+                inline= False
+            )
+    else:
+        embed.add_field(
+            name  = "🎭 Role Hints",
+            value = "Hint-based boards for specific roles in the current game.",
+            inline=False
+        )
+        embed.add_field(
+            name  = "📋 General Templates",
+            value = "Saved templates for quiet nights, game endings, missed votes, and more.",
+            inline=False
+        )
+
     await interaction.followup.send(embed=embed, view=view, ephemeral=True)
 
 
