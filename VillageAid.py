@@ -9965,8 +9965,10 @@ async def add_player(interaction: discord.Interaction, player: discord.Member, r
             await wolf_ch.send(fmt(f"🐺 **{player.display_name}** has joined the pack!"))
 
     # Send role card using standard build_role_card
-    font  = get_guild_font(interaction.guild_id)
-    embed = build_role_card(player, role_name, role_info, font)
+    font    = get_guild_font(interaction.guild_id)
+    disney  = is_disney_mode(interaction.guild_id)
+    hp      = is_hp_mode(interaction.guild_id)
+    embed   = build_role_card(player, role_name, role_info, font, disney=disney, hp=hp)
     await ch.send(player.mention, embed=embed)
 
     # If night phase — send night action prompt
@@ -9987,9 +9989,28 @@ async def add_player(interaction: discord.Interaction, player: discord.Member, r
         else:
             await ch.send(fmt(f"🌙 Night {night_num} is active. Sleep tight — await the morning."))
 
-    # Refresh player list and win tracker
+    # Refresh player list, win tracker, and role list
     await refresh_player_list(interaction.guild)
     await refresh_win_tracker(interaction.guild)
+
+    # Update role list channel with new role if not already listed
+    role_list_ch = interaction.guild.get_channel(state.get("role_list_ch_id") or 0)
+    if role_list_ch:
+        try:
+            rows_now      = db_get_assignments(interaction.guild_id)
+            final_counts  = {}
+            for r in rows_now:
+                final_counts[r[1]] = final_counts.get(r[1], 0) + 1
+            all_roles_map = {r["name"]: r for r in cached_load_roles(interaction.guild_id)}
+            disney = is_disney_mode(interaction.guild_id)
+            hp     = is_hp_mode(interaction.guild_id)
+            font   = get_guild_font(interaction.guild_id)
+            # Clear and repost
+            await role_list_ch.purge(limit=20)
+            await post_role_list_embeds(role_list_ch, final_counts, all_roles_map,
+                                        guild_id=interaction.guild_id)
+        except Exception as e:
+            print(f"[add_player] role list refresh failed: {e}")
 
     phase = cached_get_state(interaction.guild_id).get("phase", "day").capitalize()
     await log_event(interaction.guild, phase,
