@@ -287,9 +287,43 @@ def init_db():
                     created_at    INTEGER DEFAULT 0,
                     PRIMARY KEY (guild_id, name)
                  )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS challenges (
+                    guild_id      INTEGER,
+                    challenge_id  INTEGER,
+                    prompt        TEXT,
+                    is_open       INTEGER DEFAULT 1,
+                    created_at    INTEGER DEFAULT 0,
+                    PRIMARY KEY (guild_id, challenge_id)
+                 )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS challenge_submissions (
+                    guild_id      INTEGER,
+                    challenge_id  INTEGER,
+                    player_id     INTEGER,
+                    answer        TEXT,
+                    submitted_at  INTEGER DEFAULT 0,
+                    PRIMARY KEY (guild_id, challenge_id, player_id)
+                 )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS player_tokens (
+                    guild_id      INTEGER,
+                    player_id     INTEGER,
+                    token_type    TEXT,
+                    used          INTEGER DEFAULT 0,
+                    awarded_at    INTEGER DEFAULT 0,
+                    used_at       INTEGER DEFAULT 0,
+                    PRIMARY KEY (guild_id, player_id, token_type)
+                 )''')
     try:
         c.execute("ALTER TABLE elimination_log ADD COLUMN elim_type TEXT DEFAULT 'unknown'")
+    except Exception:
+        pass
+    try:
         c.execute("ALTER TABLE elimination_log ADD COLUMN day_or_night INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
         c.execute("ALTER TABLE elimination_log ADD COLUMN eliminated_at INTEGER DEFAULT 0")
     except Exception:
         pass
@@ -558,13 +592,26 @@ def init_db():
 
     # Game recap storage — elimination log
     c.execute('''CREATE TABLE IF NOT EXISTS elimination_log (
-                    guild_id    INTEGER,
-                    player_id   INTEGER,
-                    role_name   TEXT,
-                    night_num   INTEGER,
-                    reason      TEXT,
+                    guild_id       INTEGER,
+                    player_id      INTEGER,
+                    role_name      TEXT,
+                    night_num      INTEGER,
+                    reason         TEXT,
+                    elim_type      TEXT DEFAULT 'unknown',
+                    day_or_night   INTEGER DEFAULT 0,
+                    eliminated_at  INTEGER DEFAULT 0,
                     PRIMARY KEY (guild_id, player_id)
                  )''')
+    # Migrations for existing DBs that have the old schema
+    for col, defn in [
+        ("elim_type",     "TEXT DEFAULT 'unknown'"),
+        ("day_or_night",  "INTEGER DEFAULT 0"),
+        ("eliminated_at", "INTEGER DEFAULT 0"),
+    ]:
+        try:
+            c.execute(f"ALTER TABLE elimination_log ADD COLUMN {col} {defn}")
+        except Exception:
+            pass
 
 
     c.execute('''CREATE TABLE IF NOT EXISTS npcs (
@@ -3172,6 +3219,426 @@ async def spectate(interaction: discord.Interaction):
             await interaction.followup.send(
                 "❌ Could not assign role — ask a mod directly.", ephemeral=True)
 
+@tree.command(name="challenge", description="Post a pre-game challenge for players to submit answers")
+@is_mod()
+@app_commands.describe(
+    prompt_type = "Type of challenge to post",
+    custom      = "Custom prompt text (only used if prompt_type is 'custom')"
+)
+@app_commands.choices(prompt_type=[
+    app_commands.Choice(name="🧀 Dad Joke",           value="dad_joke"),
+    app_commands.Choice(name="😏 Pick-Up Line",       value="pickup_line"),
+    app_commands.Choice(name="🕵️ Suspicious Alibi",  value="alibi"),
+    app_commands.Choice(name="🌙 Complete the Sentence", value="whisperfall"),
+    app_commands.Choice(name="🔥 Roast the Mod",      value="roast"),
+    app_commands.Choice(name="🌸 Haiku",              value="haiku"),
+    app_commands.Choice(name="😇 Confession",         value="confession"),
+    app_commands.Choice(name="🔮 Death Prophecy",     value="prophecy"),
+    app_commands.Choice(name="✏️ Custom",             value="custom"),
+])
+async def challenge_cmd(interaction: discord.Interaction, prompt_type: str, custom: str = ""):
+    await interaction.response.defer(ephemeral=True)
+    state = cached_get_state(interaction.guild_id) or {}
+
+    if prompt_type == "custom" and not custom:
+        return await interaction.followup.send("❌ Please provide a custom prompt.", ephemeral=True)
+
+    prompt = custom if prompt_type == "custom" else CHALLENGE_PROMPTS[prompt_type]
+    cid    = db_open_challenge(interaction.guild_id, prompt)
+
+    vc_ch = interaction.guild.get_channel(state.get("village_chat_ch_id") or 0)
+    if not vc_ch:
+        return await interaction.followup.send("❌ Village chat channel not found.", ephemeral=True)
+
+    embed = discord.Embed(
+        title       = "🎮 Pre-Game Challenge!",
+        description = (
+            f"{prompt}\n\n"
+            f"**How to enter:** Use `/challenge_submit` to send your answer.\n"
+            f"*The mod will pick a winner and award a special one-time token!*\n\n"
+            f"**What are tokens?** Unique one-time abilities you can use during the game.\n"
+            f"Use `/my_tokens` to see what you've won."
+        ),
+        color = 0xF39C12
+    )
+    embed.set_footer(text=f"Challenge #{cid} · Mod will announce the winner before the game starts")
+    await vc_ch.send("@here", embed=embed)
+    await interaction.followup.send(
+        f"✅ Challenge #{cid} posted to village-chat.\n"
+        f"Use `/challenge_close` to stop submissions and pick a winner.", ephemeral=True)
+
+
+@tree.command(name="challenge_submit", description="Submit your answer to the current challenge")
+@app_commands.describe(answer="Your challenge submission")
+async def challenge_submit(interaction: discord.Interaction, answer: str):
+    await interaction.response.defer(ephemeral=True)
+    challenge = db_get_active_challenge(interaction.guild_id)
+    if not challenge:
+        return await interaction.followup.send("❌ No active challenge right now.", ephemeral=True)
+
+    cid, prompt = challenge
+    db_submit_challenge(interaction.guild_id, cid, interaction.user.id, answer)
+    await interaction.followup.send(
+        f"✅ Your answer has been submitted!\n*The mod will announce the winner before the game starts.*",
+        ephemeral=True)
+
+    # Notify mod-log
+    await post_mod_log(interaction.guild,
+        f"📝 **Challenge submission** — {interaction.user.display_name}\n"
+        f"*\"{answer}\"*")
+
+
+@tree.command(name="challenge_close", description="Close submissions and pick a winner to award a token")
+@is_mod()
+async def challenge_close(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    challenge = db_get_active_challenge(interaction.guild_id)
+    if not challenge:
+        return await interaction.followup.send("❌ No active challenge.", ephemeral=True)
+
+    cid, prompt = challenge
+    submissions = db_get_submissions(interaction.guild_id, cid)
+    if not submissions:
+        db_close_challenge(interaction.guild_id, cid)
+        return await interaction.followup.send("❌ No submissions received. Challenge closed.", ephemeral=True)
+
+    db_close_challenge(interaction.guild_id, cid)
+
+    # Show all submissions to mod for picking
+    lines = []
+    for pid, answer in submissions:
+        m = interaction.guild.get_member(pid)
+        name = m.display_name if m else str(pid)
+        lines.append(f"**{name}:** {answer}")
+
+    embed = discord.Embed(
+        title       = f"📋 Challenge #{cid} Submissions ({len(submissions)} received)",
+        description = "\n\n".join(lines[:20]),
+        color       = 0xF39C12
+    )
+    embed.set_footer(text="Use /challenge_award @player [token] to award the winner")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@tree.command(name="challenge_award", description="Award a token to the challenge winner")
+@is_mod()
+@app_commands.describe(
+    player     = "The winning player",
+    token_type = "Which token to award"
+)
+@app_commands.choices(token_type=[
+    app_commands.Choice(name="🛡️ Guardian — protection from wolf kill",           value="guardian"),
+    app_commands.Choice(name="🔍 Peek — learn if a player is wolf-aligned",       value="peek"),
+    app_commands.Choice(name="🎯 Double Vote — your vote counts twice",           value="double_vote"),
+    app_commands.Choice(name="🌙 Skip Night — wolves can't target you tonight",   value="skip_night"),
+    app_commands.Choice(name="💊 Save — protect any player from wolf kill",       value="save"),
+    app_commands.Choice(name="🤫 Silence — force a player to abstain",            value="silence"),
+    app_commands.Choice(name="🎭 Reveal — force alignment reveal",                value="reveal"),
+    app_commands.Choice(name="📜 History — see a player's full vote history",     value="history"),
+    app_commands.Choice(name="🔔 Alert — notified when a player votes for you",   value="alert"),
+    app_commands.Choice(name="🕊️ Pardon — saved from elimination once",           value="pardon"),
+    app_commands.Choice(name="📣 Broadcast — anonymous message to village",       value="broadcast"),
+    app_commands.Choice(name="🎰 Gamble — learn a wolf OR reveal your role",      value="gamble"),
+    app_commands.Choice(name="⚰️ Grave — final message if eliminated",            value="grave"),
+    app_commands.Choice(name="🪞 Mirror — reflect wolf kill back at attacker",    value="mirror"),
+    app_commands.Choice(name="🃏 Wild — mystery token",                           value="wild"),
+])
+async def challenge_award(interaction: discord.Interaction,
+                          player: discord.Member, token_type: str):
+    await interaction.response.defer(ephemeral=True)
+    token = TOKENS[token_type]
+    db_award_token(interaction.guild_id, player.id, token_type)
+
+    # Notify winner privately
+    state = cached_get_state(interaction.guild_id) or {}
+    rows  = db_get_assignments(interaction.guild_id)
+    priv_row = next((r for r in rows if r[0] == player.id), None)
+    priv_ch  = interaction.guild.get_channel(priv_row[3]) if priv_row and len(priv_row) > 3 else None
+
+    embed = discord.Embed(
+        title       = f"{token['emoji']} You won a token!",
+        description = (
+            f"**{token['name']}**\n\n"
+            f"{token['desc']}\n\n"
+            f"*This is a one-time use item. Use `/use_token` when you want to activate it.*\n"
+            f"*You can check your tokens anytime with `/my_tokens`.*"
+        ),
+        color = 0xF39C12
+    )
+
+    if priv_ch:
+        await priv_ch.send(player.mention, embed=embed)
+    else:
+        try:
+            await player.send(embed=embed)
+        except Exception:
+            pass
+
+    # Announce in village-chat (without revealing which token)
+    vc_ch = interaction.guild.get_channel(state.get("village_chat_ch_id") or 0)
+    if vc_ch:
+        await vc_ch.send(
+            f"🏆 **{player.display_name}** won the challenge and has been awarded a special token!\n"
+            f"*What it does is their secret to keep — for now.*")
+
+    await post_mod_log(interaction.guild,
+        f"🎁 **Token awarded** — {player.display_name} received **{token['name']}** ({token_type})")
+
+    await interaction.followup.send(
+        f"✅ **{token['name']}** awarded to **{player.display_name}**.\n"
+        f"They've been notified privately.", ephemeral=True)
+
+
+@tree.command(name="my_tokens", description="See your current tokens")
+async def my_tokens(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    tokens = db_get_player_tokens(interaction.guild_id, interaction.user.id)
+    if not tokens:
+        return await interaction.followup.send(
+            "You have no tokens. Win a pre-game challenge to earn one!", ephemeral=True)
+
+    lines = []
+    for token_type, used in tokens:
+        token = TOKENS.get(token_type, {"emoji": "❓", "name": token_type, "desc": "Unknown token"})
+        status = "~~used~~" if used else "**available**"
+        lines.append(f"{token['emoji']} **{token['name']}** — {status}\n*{token['desc']}*")
+
+    embed = discord.Embed(
+        title       = "🎒 Your Tokens",
+        description = "\n\n".join(lines),
+        color       = 0xF39C12
+    )
+    embed.set_footer(text="Use /use_token to activate one")
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@tree.command(name="use_token", description="Activate one of your tokens")
+@app_commands.describe(token_type="Which token to use")
+@app_commands.choices(token_type=[
+    app_commands.Choice(name="🛡️ Guardian",   value="guardian"),
+    app_commands.Choice(name="🔍 Peek",        value="peek"),
+    app_commands.Choice(name="🎯 Double Vote", value="double_vote"),
+    app_commands.Choice(name="🌙 Skip Night",  value="skip_night"),
+    app_commands.Choice(name="💊 Save",        value="save"),
+    app_commands.Choice(name="🤫 Silence",     value="silence"),
+    app_commands.Choice(name="🎭 Reveal",      value="reveal"),
+    app_commands.Choice(name="📜 History",     value="history"),
+    app_commands.Choice(name="🔔 Alert",       value="alert"),
+    app_commands.Choice(name="🕊️ Pardon",     value="pardon"),
+    app_commands.Choice(name="📣 Broadcast",   value="broadcast"),
+    app_commands.Choice(name="🎰 Gamble",      value="gamble"),
+    app_commands.Choice(name="⚰️ Grave",       value="grave"),
+    app_commands.Choice(name="🪞 Mirror",      value="mirror"),
+    app_commands.Choice(name="🃏 Wild",        value="wild"),
+])
+async def use_token(interaction: discord.Interaction, token_type: str):
+    await interaction.response.defer(ephemeral=True)
+
+    if not db_has_token(interaction.guild_id, interaction.user.id, token_type):
+        return await interaction.followup.send(
+            "❌ You don't have that token or it's already been used.", ephemeral=True)
+
+    token = TOKENS.get(token_type, {})
+
+    # Tokens that need a target — show a confirmation view
+    if token_type in ("peek", "save", "silence", "reveal", "history", "alert"):
+        view = TokenTargetView(interaction.guild_id, interaction.user.id, token_type)
+        await interaction.followup.send(
+            f"**{token['emoji']} {token['name']}** — Choose your target:",
+            view=view, ephemeral=True)
+
+    elif token_type == "broadcast":
+        modal = BroadcastModal(interaction.guild_id, interaction.user.id)
+        await interaction.response.send_modal(modal)
+
+    elif token_type == "gamble":
+        # Flip a coin
+        import random as _rand
+        heads = _rand.random() < 0.5
+        db_use_token(interaction.guild_id, interaction.user.id, token_type)
+        rows   = db_get_assignments(interaction.guild_id)
+        state  = cached_get_state(interaction.guild_id) or {}
+
+        if heads:
+            # Learn one wolf's name
+            wolves = [r for r in rows if r[2] == 1 and get_team(interaction.guild_id, r[1]) == "wolf"
+                      and r[0] != interaction.user.id]
+            if wolves:
+                wolf_row = _rand.choice(wolves)
+                wolf_m   = interaction.guild.get_member(wolf_row[0])
+                wolf_nm  = wolf_m.display_name if wolf_m else str(wolf_row[0])
+                await interaction.followup.send(
+                    f"🎰 **Heads!** You learn the name of one wolf:\n"
+                    f"**{wolf_nm}** is on the wolf team.", ephemeral=True)
+            else:
+                await interaction.followup.send(
+                    "🎰 **Heads!** No wolves found to reveal.", ephemeral=True)
+        else:
+            # One wolf learns your role
+            wolves = [r for r in rows if r[2] == 1 and get_team(interaction.guild_id, r[1]) == "wolf"]
+            my_row = next((r for r in rows if r[0] == interaction.user.id), None)
+            my_role = my_row[1] if my_row else "Unknown"
+            if wolves:
+                wolf_row = _rand.choice(wolves)
+                wolf_ch_id = wolf_row[3] if len(wolf_row) > 3 else None
+                wolf_ch    = interaction.guild.get_channel(wolf_ch_id) if wolf_ch_id else None
+                if wolf_ch:
+                    await wolf_ch.send(
+                        f"🎰 **Gamble Token fired!** You learn that **{interaction.user.display_name}** "
+                        f"is playing as **{my_role}**.")
+            await interaction.followup.send(
+                f"🎰 **Tails!** A random wolf has learned your role ({my_role}).\n"
+                f"The mod-log has a record of this.", ephemeral=True)
+            await post_mod_log(interaction.guild,
+                f"🎰 **Gamble Token** — {interaction.user.display_name} rolled tails.\n"
+                f"Their role ({my_role}) was revealed to a random wolf.")
+
+    elif token_type == "wild":
+        # Show all tokens for them to pick one
+        view = WildTokenView(interaction.guild_id, interaction.user.id)
+        await interaction.followup.send(
+            "🃏 **Wild Token** — Choose any token from the list:",
+            view=view, ephemeral=True)
+
+    else:
+        # Passive tokens — just register and notify mod
+        db_use_token(interaction.guild_id, interaction.user.id, token_type)
+        messages = {
+            "guardian":    "🛡️ **Guardian Token activated.** You are protected from the next wolf kill. The mod has been notified.",
+            "double_vote": "🎯 **Double Vote Token activated.** Your next vote will count twice. Declare it when you vote today.",
+            "skip_night":  "🌙 **Skip Night Token activated.** Wolves cannot target you tonight. The mod has been notified.",
+            "pardon":      "🕊️ **Pardon Token activated.** If you receive the most votes today you will be spared. The mod has been notified.",
+            "grave":       "⚰️ **Grave Token registered.** If you are eliminated, you will get one final anonymous message to post.",
+            "mirror":      "🪞 **Mirror Token activated.** If the wolves target you tonight, the kill reflects back on them.",
+        }
+        await interaction.followup.send(messages.get(token_type, "✅ Token activated."), ephemeral=True)
+        await post_mod_log(interaction.guild,
+            f"🎒 **Token used** — {interaction.user.display_name} activated **{TOKENS[token_type]['name']}**")
+
+
+class TokenTargetView(View):
+    """Shown when a token requires a target player."""
+    def __init__(self, guild_id, owner_id, token_type):
+        super().__init__(timeout=120)
+        self.guild_id   = guild_id
+        self.owner_id   = owner_id
+        self.token_type = token_type
+        rows = db_get_assignments(guild_id)
+        alive = [r for r in rows if r[2] == 1 and r[0] != owner_id]
+        if alive:
+            opts = []
+            for r in alive[:25]:
+                opts.append(discord.SelectOption(label=f"Player {r[0]}", value=str(r[0])))
+            sel = Select(placeholder="Choose a target...", options=opts,
+                         custom_id=f"tok_target_{guild_id}_{owner_id}_{token_type}")
+            sel.callback = self.on_target
+            self.add_item(sel)
+
+    async def on_target(self, interaction: discord.Interaction):
+        target_id = int(interaction.data["values"][0])
+        target    = interaction.guild.get_member(target_id)
+        tname     = target.display_name if target else str(target_id)
+        token     = TOKENS.get(self.token_type, {})
+
+        if not db_use_token(self.guild_id, interaction.user.id, self.token_type):
+            return await interaction.response.send_message(
+                "❌ Token already used.", ephemeral=True)
+
+        if self.token_type == "peek":
+            team = get_team(self.guild_id, next(
+                (r[1] for r in db_get_assignments(self.guild_id) if r[0] == target_id), ""))
+            is_wolf = team == "wolf"
+            await interaction.response.send_message(
+                f"🔍 **Peek result:** Is **{tname}** on the wolf team?\n"
+                f"**{'Yes 🐺' if is_wolf else 'No ✅'}**", ephemeral=True)
+
+        elif self.token_type == "history":
+            vote_hist = db_get_vote_history(self.guild_id)
+            lines = []
+            for row in vote_hist:
+                day_num, voter_id, vtarget_id, action = row[0], row[1], row[2], row[3]
+                if voter_id == target_id:
+                    vtarget = interaction.guild.get_member(vtarget_id)
+                    vtname  = vtarget.display_name if vtarget else str(vtarget_id)
+                    changed = " *(changed)*" if action == "change" else ""
+                    lines.append(f"Day {day_num}: voted **{vtname}**{changed}")
+            result = "\n".join(lines) if lines else "*No votes on record.*"
+            await interaction.response.send_message(
+                f"📜 **{tname}'s vote history:**\n{result}", ephemeral=True)
+
+        else:
+            await interaction.response.send_message(
+                f"✅ **{token.get('emoji','')} {token.get('name','')}** activated on **{tname}**.\n"
+                f"The mod has been notified.", ephemeral=True)
+
+        await post_mod_log(interaction.guild,
+            f"🎒 **{TOKENS.get(self.token_type, {}).get('name', self.token_type)} used** — "
+            f"{interaction.user.display_name} → target: {tname}")
+        self.stop()
+
+
+class WildTokenView(View):
+    """Shown when Wild Token is used — pick any token."""
+    def __init__(self, guild_id, owner_id):
+        super().__init__(timeout=120)
+        self.guild_id = guild_id
+        self.owner_id = owner_id
+        opts = [
+            discord.SelectOption(label=f"{t['emoji']} {t['name']}", value=key,
+                                 description=t['desc'][:50])
+            for key, t in TOKENS.items() if key != "wild"
+        ]
+        sel = Select(placeholder="Choose your token...", options=opts[:25],
+                     custom_id=f"wild_{guild_id}_{owner_id}")
+        sel.callback = self.on_pick
+        self.add_item(sel)
+
+    async def on_pick(self, interaction: discord.Interaction):
+        chosen = interaction.data["values"][0]
+        db_use_token(self.guild_id, interaction.user.id, "wild")
+        db_award_token(self.guild_id, interaction.user.id, chosen)
+        token = TOKENS[chosen]
+        await interaction.response.send_message(
+            f"🃏 **Wild Token converted to {token['emoji']} {token['name']}!**\n"
+            f"*{token['desc']}*\n\nUse `/use_token` to activate it.",
+            ephemeral=True)
+        await post_mod_log(interaction.guild,
+            f"🃏 **Wild Token** — {interaction.user.display_name} chose **{token['name']}**")
+        self.stop()
+
+
+class BroadcastModal(discord.ui.Modal, title="Anonymous Broadcast"):
+    message = discord.ui.TextInput(
+        label       = "Your anonymous message",
+        placeholder = "Say something to the village — no name will be attached",
+        style       = discord.TextStyle.paragraph,
+        max_length  = 300,
+        required    = True,
+    )
+
+    def __init__(self, guild_id, player_id):
+        super().__init__()
+        self.guild_id  = guild_id
+        self.player_id = player_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not db_use_token(self.guild_id, self.player_id, "broadcast"):
+            return await interaction.response.send_message("❌ Token already used.", ephemeral=True)
+        state = cached_get_state(self.guild_id) or {}
+        vc_ch = interaction.guild.get_channel(state.get("village_chat_ch_id") or 0)
+        if vc_ch:
+            embed = discord.Embed(
+                description = f"*\"{self.message.value}\"*",
+                color       = 0x2C3060
+            )
+            embed.set_footer(text="— Anonymous")
+            await vc_ch.send("📣 **An anonymous message has been delivered to the village:**", embed=embed)
+        await interaction.response.send_message("✅ Your anonymous message has been posted.", ephemeral=True)
+        await post_mod_log(interaction.guild,
+            f"📣 **Broadcast Token used** — {interaction.user.display_name}\n"
+            f"*\"{self.message.value}\"*")
+
+
 @tree.command(name="lobby", description="Open, close, or manage the pre-game lobby")
 @is_mod()
 @app_commands.describe(
@@ -4249,8 +4716,12 @@ async def refresh_wolf_vote(guild, night_num):
     try:
         msg = await ch.fetch_message(mid)
         await msg.edit(embed=embed, view=view)
-    except Exception:
-        pass
+    except discord.NotFound:
+        print(f"[refresh_wolf_vote] message {mid} not found — may have been deleted")
+    except discord.HTTPException as e:
+        print(f"[refresh_wolf_vote] HTTP error editing message: {e}")
+    except Exception as e:
+        print(f"[refresh_wolf_vote] unexpected error: {e}")
 
 async def refresh_timeline(guild):
     state = cached_get_state(guild.id)
@@ -8636,6 +9107,136 @@ ROLE_IMAGES = {
     "Wraith":           "https://i.imgur.com/8xqY8hp.png",
 }
 
+# ====================== CHALLENGE & TOKEN SYSTEM ======================
+
+# All available token types with descriptions and effects
+TOKENS = {
+    "guardian":     {"emoji": "🛡️",  "name": "Guardian Token",      "desc": "One-time protection from a wolf kill. Fires automatically the night you would have died."},
+    "peek":         {"emoji": "🔍",  "name": "Peek Token",           "desc": "Ask the bot one yes/no question: Is [player] on the wolf team? Answer sent privately."},
+    "double_vote":  {"emoji": "🎯",  "name": "Double Vote Token",    "desc": "Your vote counts twice for one day. Declare it when casting your vote."},
+    "skip_night":   {"emoji": "🌙",  "name": "Skip Night Token",     "desc": "Wolves cannot target you tonight. Declare before night ends."},
+    "save":         {"emoji": "💊",  "name": "Save Token",           "desc": "Protect any player of your choosing from the next wolf kill."},
+    "silence":      {"emoji": "🤫",  "name": "Silence Token",        "desc": "Force one player to abstain from the next day vote. Mod executes it."},
+    "reveal":       {"emoji": "🎭",  "name": "Reveal Token",         "desc": "Force one player to publicly confirm whether they are village or wolf-aligned."},
+    "history":      {"emoji": "📜",  "name": "History Token",        "desc": "See the full vote history of one player across all days including every change."},
+    "alert":        {"emoji": "🔔",  "name": "Alert Token",          "desc": "You are privately notified the next time a specific player votes for you."},
+    "pardon":       {"emoji": "🕊️",  "name": "Pardon Token",         "desc": "If you receive the most votes today you are spared. Second highest is eliminated instead."},
+    "broadcast":    {"emoji": "📣",  "name": "Broadcast Token",      "desc": "Send one anonymous message to all of village-chat. No name attached."},
+    "gamble":       {"emoji": "🎰",  "name": "Gamble Token",         "desc": "Flip a coin. Heads: you learn one wolf's name. Tails: one wolf learns your role."},
+    "grave":        {"emoji": "⚰️",  "name": "Grave Token",          "desc": "If you are eliminated, you get one final anonymous message posted to village-chat."},
+    "mirror":       {"emoji": "🪞",  "name": "Mirror Token",         "desc": "If you are wolf-killed tonight, the kill bounces back and eliminates the wolf who chose you."},
+    "wild":         {"emoji": "🃏",  "name": "Wild Token",           "desc": "Mystery box — you pick any token from the full list. You don't know what you're getting until you open it."},
+}
+
+# Challenge prompts by category
+CHALLENGE_PROMPTS = {
+    "dad_joke":    "🧀 **Dad Joke Challenge** — Tell us your best (worst) dad joke. The groan-worthiest wins!",
+    "pickup_line": "😏 **Pick-Up Line Challenge** — Drop your best (or worst) pick-up line. Most creative wins!",
+    "alibi":       "🕵️ **Suspicious Alibi Challenge** — Give the most suspicious-sounding innocent alibi you can.",
+    "whisperfall": "🌙 **Whisperfall Challenge** — Complete this sentence: *'The wolves are definitely not...'*",
+    "roast":       "🔥 **Roast Challenge** — Roast the mod in one sentence. Funniest wins!",
+    "haiku":       "🌸 **Haiku Challenge** — Write a haiku about Whisperfall. 5-7-5 syllables.",
+    "confession":  "😇 **Confession Challenge** — Confess the most suspicious thing you've ever done in a Mafia game.",
+    "prophecy":    "🔮 **Prophecy Challenge** — Predict who will be the first to die tonight. Most creative prediction wins!",
+    "custom":      "✏️ **Custom Challenge**",
+}
+
+
+def db_open_challenge(guild_id, prompt):
+    import time as _t
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT COALESCE(MAX(challenge_id),0)+1 FROM challenges WHERE guild_id=?", (guild_id,))
+    cid = c.fetchone()[0]
+    c.execute("INSERT INTO challenges VALUES (?,?,?,?,?)",
+              (guild_id, cid, prompt, 1, int(_t.time())))
+    conn.commit()
+    conn.close()
+    return cid
+
+def db_close_challenge(guild_id, challenge_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("UPDATE challenges SET is_open=0 WHERE guild_id=? AND challenge_id=?",
+              (guild_id, challenge_id))
+    conn.commit()
+    conn.close()
+
+def db_get_active_challenge(guild_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT challenge_id, prompt FROM challenges WHERE guild_id=? AND is_open=1 ORDER BY challenge_id DESC LIMIT 1",
+              (guild_id,))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+def db_submit_challenge(guild_id, challenge_id, player_id, answer):
+    import time as _t
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO challenge_submissions VALUES (?,?,?,?,?)",
+              (guild_id, challenge_id, player_id, answer, int(_t.time())))
+    conn.commit()
+    conn.close()
+
+def db_get_submissions(guild_id, challenge_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT player_id, answer FROM challenge_submissions WHERE guild_id=? AND challenge_id=?",
+              (guild_id, challenge_id))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def db_award_token(guild_id, player_id, token_type):
+    import time as _t
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO player_tokens VALUES (?,?,?,?,?,?)",
+              (guild_id, player_id, token_type, 0, int(_t.time()), 0))
+    conn.commit()
+    conn.close()
+
+def db_get_player_tokens(guild_id, player_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT token_type, used FROM player_tokens WHERE guild_id=? AND player_id=?",
+              (guild_id, player_id))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def db_use_token(guild_id, player_id, token_type):
+    import time as _t
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("UPDATE player_tokens SET used=1, used_at=? WHERE guild_id=? AND player_id=? AND token_type=? AND used=0",
+              (int(_t.time()), guild_id, player_id, token_type))
+    affected = c.rowcount
+    conn.commit()
+    conn.close()
+    return affected > 0  # Returns True if token was successfully used
+
+def db_has_token(guild_id, player_id, token_type):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM player_tokens WHERE guild_id=? AND player_id=? AND token_type=? AND used=0",
+              (guild_id, player_id, token_type))
+    count = c.fetchone()[0]
+    conn.close()
+    return count > 0
+
+def db_clear_tokens(guild_id):
+    """Clear all tokens at game end."""
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("DELETE FROM player_tokens WHERE guild_id=?", (guild_id,))
+    c.execute("UPDATE challenges SET is_open=0 WHERE guild_id=?", (guild_id,))
+    conn.commit()
+    conn.close()
+
+
 def get_disney_role(role_name: str) -> tuple:
     """Return (disney_name, team) for a role, or original name if not mapped."""
     return DISNEY_ROLE_MAP.get(role_name, (role_name, None))
@@ -9871,6 +10472,7 @@ async def end_game(interaction: discord.Interaction):
         # No separate purge needed
 
         db_clear_state(interaction.guild_id)
+        db_clear_tokens(interaction.guild_id)
 
         # Cancel any active phase timers so they don't fire on deleted channels
         t_night = night_timers.pop(interaction.guild_id, None)
@@ -12342,14 +12944,13 @@ class WolfVoteView(View):
         if not non_wolf:
             btn = Button(label="No targets available", disabled=True,
                          style=discord.ButtonStyle.secondary,
-                         custom_id=f"wv_notargets_{guild_id}")
+                         custom_id=f"wv_notargets_{guild_id}_{self.night_num}")
             self.add_item(btn)
             return
         npcs_wv    = db_get_npcs(guild_id)
         npc_map_wv = {n["npc_id"]: n["name"] for n in npcs_wv}
         options = []
         for pid, role_name, is_alive, _ in non_wolf[:25]:
-            # Try to get real name from guild cache if guild is available
             npc_name = npc_map_wv.get(pid)
             if npc_name:
                 name = npc_name
@@ -12370,10 +12971,11 @@ class WolfVoteView(View):
                     value=f"dead_{pid}",
                     description="Already eliminated"
                 ))
+        # Use night_num so custom_id is unique per night
         sel = Select(
             placeholder="🐺 Choose tonight's kill target...",
             options=options,
-            custom_id=f"wv_select_{guild_id}"
+            custom_id=f"wv_select_{guild_id}_{self.night_num}"
         )
         sel.callback = self.on_vote
         self._sel = sel
@@ -12406,7 +13008,9 @@ class WolfVoteView(View):
         # are all network calls that can exceed the 3-second interaction window
         await interaction.response.defer(ephemeral=True)
 
-        db_set_wolf_vote(interaction.guild_id, self.night_num, interaction.user.id, target_id)
+        # Always use fresh night_num from DB — self.night_num may be stale after restart
+        current_night = db_get_night_num(interaction.guild_id)
+        db_set_wolf_vote(interaction.guild_id, current_night, interaction.user.id, target_id)
         target = interaction.guild.get_member(target_id)
         tname  = target.display_name if target else str(target_id)
         voter  = interaction.guild.get_member(interaction.user.id)
@@ -12414,7 +13018,7 @@ class WolfVoteView(View):
         # Check if all alive wolves have voted for the same target — if so, lock it
         rows_wv    = db_get_assignments(interaction.guild_id)
         wolf_alive = [r[0] for r in rows_wv if r[2] == 1 and get_team(interaction.guild_id, r[1]) == "wolf"]
-        wolf_votes = db_get_wolf_votes(interaction.guild_id, self.night_num)
+        wolf_votes = db_get_wolf_votes(interaction.guild_id, current_night)
 
         # Tally votes
         vote_tally = {}
@@ -12425,7 +13029,7 @@ class WolfVoteView(View):
         # Post to mod-log
         try:
             await post_mod_log(interaction.guild,
-                f"🐺 **Wolf Vote** — Night {self.night_num}\n"
+                f"🐺 **Wolf Vote** — Night {current_night}\n"
                 f"**{voter.display_name if voter else interaction.user.id}** voted to kill **{tname}**\n"
                 f"*Pack vote tally: {len(wolf_votes)}/{len(wolf_alive)} vote(s) cast.*")
         except Exception as e:
@@ -12449,7 +13053,7 @@ class WolfVoteView(View):
                 print(f"[wolf_vote] den lock message failed: {e}")
 
         try:
-            await refresh_wolf_vote(interaction.guild, self.night_num)
+            await refresh_wolf_vote(interaction.guild, current_night)
         except Exception as e:
             print(f"[wolf_vote] refresh failed: {e}")
 
@@ -12458,6 +13062,100 @@ class WolfVoteView(View):
             ephemeral=True)
 
 # ====================== ELIMINATE ======================
+class LastWillModal(discord.ui.Modal, title="Your Final Message"):
+    message = discord.ui.TextInput(
+        label       = "Your last words",
+        placeholder = "What do you want the village to know? (No role reveals or alliance hints)",
+        style       = discord.TextStyle.paragraph,
+        max_length  = 500,
+        required    = True,
+    )
+
+    def __init__(self, guild_id: int, player_id: int, player_name: str):
+        super().__init__()
+        self.guild_id    = guild_id
+        self.player_id   = player_id
+        self.player_name = player_name
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        content = self.message.value.strip()
+        if not content:
+            return await interaction.followup.send("No message submitted.", ephemeral=True)
+
+        state  = cached_get_state(self.guild_id) or {}
+        disney = bool(state.get("disney_mode", 0))
+        hp     = bool(state.get("hp_mode", 0))
+        vc_ch  = interaction.guild.get_channel(state.get("village_chat_ch_id") or 0)
+
+        if not vc_ch:
+            return await interaction.followup.send(
+                "❌ Could not find the main channel to post your message.", ephemeral=True)
+
+        if disney:
+            header = f"📜 **{self.player_name}'s Final Words to the Kingdom:**"
+        elif hp:
+            header = f"📜 **{self.player_name}'s Final Message:**"
+        else:
+            header = f"📜 **{self.player_name}'s Last Will:**"
+
+        embed = discord.Embed(
+            description = f"*\"{content}\"*",
+            color       = 0x2C3060
+        )
+        embed.set_footer(text=f"— {self.player_name}, in their final moments")
+        await vc_ch.send(header, embed=embed)
+
+        # Also notify mod-log
+        await post_mod_log(interaction.guild,
+            f"📜 **Last Will submitted** — {self.player_name}\n"
+            f"*\"{content}\"*\n"
+            f"*(Posted to village chat)*")
+
+        await interaction.followup.send(
+            "✅ Your final message has been posted to the village.", ephemeral=True)
+
+
+class LastWillView(View):
+    def __init__(self, guild_id: int, player_id: int, player_name: str):
+        super().__init__(timeout=600)  # 10 minutes
+        self.guild_id    = guild_id
+        self.player_id   = player_id
+        self.player_name = player_name
+
+        btn = Button(label="✍️ Write My Last Will",
+                     style=discord.ButtonStyle.primary,
+                     custom_id=f"lw_{guild_id}_{player_id}")
+        btn.callback = self.on_write
+        self.add_item(btn)
+
+        skip_btn = Button(label="Skip — I have nothing to say",
+                          style=discord.ButtonStyle.secondary,
+                          custom_id=f"lw_skip_{guild_id}_{player_id}")
+        skip_btn.callback = self.on_skip
+        self.add_item(skip_btn)
+
+    async def on_write(self, interaction: discord.Interaction):
+        if interaction.user.id != self.player_id:
+            return await interaction.response.send_message(
+                "❌ Only the eliminated player can submit a last will.", ephemeral=True)
+        modal = LastWillModal(self.guild_id, self.player_id, self.player_name)
+        await interaction.response.send_modal(modal)
+        self.stop()
+
+    async def on_skip(self, interaction: discord.Interaction):
+        if interaction.user.id != self.player_id:
+            return await interaction.response.send_message(
+                "❌ Only the eliminated player can use this.", ephemeral=True)
+        await interaction.response.edit_message(
+            content="*You chose to depart in silence.*", view=None)
+        self.stop()
+
+    async def on_timeout(self):
+        # View expired — silently disable
+        pass
+
+
 class EliminateConfirmView(View):
     """Confirmation before eliminating a player — prevents accidents."""
     def __init__(self, guild_id, player, role_name, public, assignment, state):
@@ -13081,6 +13779,46 @@ async def _eliminate_player(guild: discord.Guild, player_id: int, reason: str):
         f"**Role:** {assignment[1]} ({team_e})\n"
         f"**Reason:** {reason}\n"
         f"**Phase:** {phase} {db_get_night_num(guild.id)}")
+
+    # ── Last Will — send prompt to player's private channel ──────────────
+    try:
+        priv_ch_id = assignment[3] if len(assignment) > 3 else None
+        priv_ch    = guild.get_channel(priv_ch_id) if priv_ch_id else None
+        if priv_ch:
+            state_lw = cached_get_state(guild.id) or {}
+            disney   = bool(state_lw.get("disney_mode", 0))
+            hp       = bool(state_lw.get("hp_mode", 0))
+            if disney:
+                title    = "📜 Your Final Words to the Kingdom"
+                flavor   = "You have fallen. Before you depart the Enchanted Kingdom, you may leave one final message for those who remain."
+                warning  = "⚠️ **Do not reveal your role, alliance, or any information that could affect the game.**"
+                btn_lbl  = "✍️ Leave My Final Words"
+            elif hp:
+                title    = "📜 Your Final Message"
+                flavor   = "You have fallen. Before you leave Hogwarts, you may send one final message to those who remain."
+                warning  = "⚠️ **Do not reveal your role, alliance, or any information that could affect the game.**"
+                btn_lbl  = "✍️ Send My Final Message"
+            else:
+                title    = "📜 Last Will"
+                flavor   = "You have been eliminated. Before you depart Whisperfall, you may leave one final message for the village."
+                warning  = "⚠️ **Do not reveal your role, alliance, or any information that could affect the game.**"
+                btn_lbl  = "✍️ Write My Last Will"
+
+            embed = discord.Embed(
+                title       = title,
+                description = (
+                    f"{flavor}\n\n"
+                    f"{warning}\n\n"
+                    f"*Click the button below to write your message. "
+                    f"It will be posted anonymously to the main channel as your final words. "
+                    f"This is optional — you have 10 minutes.*"
+                ),
+                color = 0x2C3060
+            )
+            view = LastWillView(guild.id, player.id, player.display_name)
+            await priv_ch.send(player.mention, embed=embed, view=view)
+    except Exception as e:
+        print(f"[last_will] prompt failed: {e}")
     await refresh_player_list(guild)
     await refresh_day_vote(guild)
     await refresh_win_tracker(guild)
@@ -13337,6 +14075,206 @@ async def announce_win(guild, winner: str):
     await log_event(guild, "End", f"🏆 **{winner.capitalize()}** wins!")
     safe_task(_npc_endgame_reaction(guild, guild.id, winner), "npc_endgame")
 
+async def _post_game_summary(channel, guild, guild_id: int, pid_to_name: dict):
+    """
+    Post a full game summary to village-chat after assign_victors.
+    Shows every night's actions and every day's vote results in full detail.
+    Split into one embed per night/day to stay under Discord limits.
+    """
+    import asyncio as _aio
+
+    night_num  = db_get_night_num(guild_id)
+    rows       = db_get_assignments(guild_id)
+    elim_log   = db_get_elimination_log(guild_id)
+    vote_hist  = db_get_vote_history(guild_id)
+    npcs       = db_get_npcs(guild_id)
+    npc_map    = {n["npc_id"]: n["name"] for n in npcs}
+
+    def name(pid):
+        if pid is None: return "—"
+        n = npc_map.get(pid)
+        if n: return f"🤖 {n}"
+        m = guild.get_member(pid)
+        return m.display_name if m else str(pid)
+
+    def role_of(pid):
+        row = next((r for r in rows if r[0] == pid), None)
+        return row[1] if row else "?"
+
+    # Action type → readable label + emoji
+    ACTION_LABELS = {
+        "seer":              ("🔮", "Seer investigated"),
+        "medium":            ("🌀", "Medium consulted the dead about"),
+        "doctor":            ("💉", "Doctor protected"),
+        "surgeon":           ("🩺", "Surgeon saved"),
+        "huntsman":          ("🏹", "Huntsman guarded"),
+        "witch_save":        ("🧪", "Witch used save on"),
+        "witch_kill":        ("☠️",  "Witch poisoned"),
+        "wolf_kill":         ("🐺", "Den targeted"),
+        "wolf_vote":         ("🐺", "Den voted for"),
+        "alpha":             ("👑", "Alpha attempted turn on"),
+        "elite_alpha":       ("👑⭐","Elite Alpha attempted turn on"),
+        "alpha_skip":        ("👑", "Alpha skipped turn"),
+        "elite_alpha_skip":  ("👑⭐","Elite Alpha skipped turn"),
+        "wolf_pup":          ("🐾", "Wolf Pup blocked"),
+        "bloodhound":        ("🦴", "Bloodhound scanned"),
+        "bloodletter":       ("🩸", "Bloodletter marked"),
+        "cupid_bind":        ("💘", "Cupid bonded"),
+        "cupid_skip":        ("💘", "Cupid skipped bonding"),
+        "hermit":            ("🏚️", "Hermit hid"),
+        "governor_pardon":   ("🎖️", "Governor pardoned"),
+        "agitator_frenzy":   ("⚡", "Agitator declared frenzy on"),
+        "werekitten":        ("🐱", "Werekitten killed"),
+        "white_wolf":        ("🤍", "White Wolf targeted"),
+        "wraith_mark":       ("👻", "Wraith marked"),
+        "wraith_kill":       ("👻", "Wraith Kill Command fired on"),
+        "shadow_wolf":       ("🌑", "Shadow Wolf killed"),
+        "flirt":             ("💃", "Flirt distracted"),
+        "clone":             ("🪞", "Clone copied"),
+        "shapeshifter":      ("🎭", "Shapeshifter became"),
+        "dire_wolf":         ("💕", "Dire Wolf bonded with"),
+        "echo_stalker":      ("👁️", "Echo-Stalker haunted"),
+        "_pass":             ("💤", "Passed — no action"),
+    }
+
+    # Build vote tally per day
+    # vote_hist: (day_num, voter_id, target_id, action, voted_at, change_count)
+    votes_by_day = {}
+    for row in vote_hist:
+        day_num, voter_id, target_id, action = row[0], row[1], row[2], row[3]
+        votes_by_day.setdefault(day_num, []).append((voter_id, target_id, action))
+
+    # Eliminations by phase
+    elims_by_phase = {}
+    for pid, role_n, reason, elim_type, day_or_night, _ in elim_log:
+        key = (elim_type, day_or_night)
+        elims_by_phase.setdefault(key, []).append((pid, role_n, reason))
+
+    # Header
+    header = discord.Embed(
+        title       = "📖 Full Game Summary",
+        description = (
+            f"**{night_num} night(s) played** — complete record of every action and vote.\n"
+            f"*Now that the game is over, all secrets are revealed.*"
+        ),
+        color = 0x2C3060
+    )
+    await channel.send(embed=header)
+    await _aio.sleep(0.3)
+
+    # One embed per night + following day
+    for n in range(1, night_num + 1):
+        lines = []
+
+        # ── Night actions ──
+        conn_na = sqlite3.connect(DB_FILE)
+        c_na    = conn_na.cursor()
+        c_na.execute(
+            "SELECT actor_id, action_type, target_id FROM night_actions "
+            "WHERE guild_id=? AND night_num=? ORDER BY rowid",
+            (guild_id, n))
+        actions = c_na.fetchall()
+        conn_na.close()
+
+        if actions:
+            for actor_id, action_type, target_id in actions:
+                emoji, label = ACTION_LABELS.get(action_type, ("🌙", action_type))
+                actor_str  = f"**{name(actor_id)}** ({role_of(actor_id)})"
+                target_str = f"**{name(target_id)}**" if target_id else ""
+                lines.append(f"{emoji} {label} {actor_str} → {target_str}".strip(" →"))
+        else:
+            lines.append("*No actions recorded for this night.*")
+
+        # Night eliminations
+        night_elims = elims_by_phase.get(("wolf_kill", n), []) + \
+                      elims_by_phase.get(("werekitten", n), []) + \
+                      elims_by_phase.get(("shadow_wolf", n), []) + \
+                      elims_by_phase.get(("white_wolf", n), []) + \
+                      elims_by_phase.get(("witch", n), []) + \
+                      elims_by_phase.get(("mod_kill", n), [])
+        for pid, role_n, reason in night_elims:
+            lines.append(f"💀 **{name(pid)}** ({role_n}) died — *{reason}*")
+
+        night_embed = discord.Embed(
+            title       = f"🌙 Night {n}",
+            description = "\n".join(lines[:40]),
+            color       = 0x1a1a2e
+        )
+        await channel.send(embed=night_embed)
+        await _aio.sleep(0.3)
+
+        # ── Day votes ──
+        day_votes = votes_by_day.get(n, [])
+        if day_votes:
+            # Build final vote per voter (last entry wins)
+            final_votes = {}
+            for voter_id, target_id, action in day_votes:
+                if action in ("vote", "change", "abstain"):
+                    final_votes[voter_id] = (target_id, action)
+
+            vote_lines = []
+            tally = {}
+            for voter_id, (target_id, action) in final_votes.items():
+                if action == "abstain" or not target_id:
+                    vote_lines.append(f"🤐 **{name(voter_id)}** — abstained")
+                else:
+                    changed = " *(changed)*" if action == "change" else ""
+                    vote_lines.append(
+                        f"🗳️ **{name(voter_id)}** → **{name(target_id)}**{changed}")
+                    tally[target_id] = tally.get(target_id, 0) + 1
+
+            # Vote summary
+            if tally:
+                top_pid  = max(tally, key=tally.get)
+                vote_lines.append(
+                    f"\n**Result:** **{name(top_pid)}** received the most votes ({tally[top_pid]})")
+
+            # Day eliminations
+            day_elims = elims_by_phase.get(("vote", n), []) + \
+                        elims_by_phase.get(("mod_kill", n), []) + \
+                        elims_by_phase.get(("cupid", n), []) + \
+                        elims_by_phase.get(("inactivity", n), [])
+            for pid, role_n, reason in day_elims:
+                vote_lines.append(f"💀 **{name(pid)}** ({role_n}) eliminated — *{reason}*")
+
+            day_embed = discord.Embed(
+                title       = f"☀️ Day {n}",
+                description = "\n".join(vote_lines[:40]),
+                color       = 0xF39C12
+            )
+            await channel.send(embed=day_embed)
+            await _aio.sleep(0.3)
+
+    # Final elimination order
+    if elim_log:
+        elim_lines = []
+        for pid, role_n, reason, elim_type, day_or_night, _ in elim_log:
+            phase_icon = "☀️" if elim_type in ("vote", "inactivity") else "🌙"
+            phase_label = f"Day {day_or_night}" if elim_type in ("vote", "inactivity") else f"Night {day_or_night}"
+            elim_lines.append(
+                f"{phase_icon} **{name(pid)}** ({role_n}) — {phase_label} — *{reason}*")
+
+        # Split if needed
+        chunks = []
+        current = []
+        for line in elim_lines:
+            current.append(line)
+            if len("\n".join(current)) > 900:
+                chunks.append("\n".join(current[:-1]))
+                current = [line]
+        if current:
+            chunks.append("\n".join(current))
+
+        for idx, chunk in enumerate(chunks):
+            elim_embed = discord.Embed(
+                title       = "💀 Elimination Order" + (" (cont.)" if idx > 0 else ""),
+                description = chunk,
+                color       = 0x8B0000
+            )
+            await channel.send(embed=elim_embed)
+            await _aio.sleep(0.3)
+
+
 # ====================== STATS & VICTORS ======================
 @tree.command(name="assign_victors", description="Record who won this game for stats tracking")
 @is_mod()
@@ -13450,10 +14388,11 @@ async def assign_victors(interaction: discord.Interaction, winning_team: str):
         by_team.setdefault(team, []).append(
             f"{alive_icon} {winner_icon}**{_rv_name(pid)}** — {role_name}{turned_note}{traitor_note}")
 
+    t = get_theme_labels(guild_id)
     win_label = {
-        "village": "🏘️ Village Wins",
-        "wolf":    "🐺 Wolves Win",
-        "neutral": "⚖️ Neutral Wins",
+        "village": f"{t['village_icon']} {t['village']} Win",
+        "wolf":    f"{t['wolf_icon']} {t['wolf']} Win",
+        "neutral": f"{t['neutral_icon']} {t['neutral']} Win",
     }.get(winning_team, f"{winning_team.capitalize()} Wins")
 
     reveal_embed = discord.Embed(
@@ -13461,10 +14400,33 @@ async def assign_victors(interaction: discord.Interaction, winning_team: str):
         description = "The game is over. Here is everyone's role.",
         color       = team_color.get(winning_team, 0x5865F2)
     )
-    for team_key, label in [("wolf", "🐺 Wolves"), ("village", "🏘️ Village"), ("neutral", "⚖️ Neutral")]:
+    for team_key, label in [
+        ("wolf",    f"{t['wolf_icon']} {t['wolf']}"),
+        ("village", f"{t['village_icon']} {t['village']}"),
+        ("neutral", f"{t['neutral_icon']} {t['neutral']}")
+    ]:
         lines = by_team.get(team_key, [])
         if lines:
-            reveal_embed.add_field(name=label, value="\n".join(lines), inline=False)
+            value = "\n".join(lines)
+            # Discord field value limit is 1024 chars — split into multiple fields if needed
+            if len(value) <= 1024:
+                reveal_embed.add_field(name=label, value=value, inline=False)
+            else:
+                chunks = []
+                current = []
+                for line in lines:
+                    test = "\n".join(current + [line])
+                    if len(test) > 1024:
+                        chunks.append("\n".join(current))
+                        current = [line]
+                    else:
+                        current.append(line)
+                if current:
+                    chunks.append("\n".join(current))
+                for idx, chunk in enumerate(chunks):
+                    reveal_embed.add_field(
+                        name=f"{label} {'(cont.)' if idx > 0 else ''}",
+                        value=chunk, inline=False)
     reveal_embed.set_footer(text="✅ = survived  💀 = eliminated  🏆 = winning team")
 
     # ── MVP Callout ───────────────────────────────────────────────────────
@@ -13528,9 +14490,9 @@ async def assign_victors(interaction: discord.Interaction, winning_team: str):
         mvp_lines.append(f"🐺 **Wolf(ves) who survived:** {wolf_names}")
 
     # — Successful turns
-    successful_turns = [(a, t, r) for a, t, r in turn_hist if r == "success"]
+    successful_turns = [(actor_id, target_id) for _, actor_id, target_id, result in turn_hist if result == "success"]
     if successful_turns:
-        for actor_id, target_id, _ in successful_turns:
+        for actor_id, target_id in successful_turns:
             aname = pid_to_name.get(actor_id, str(actor_id))
             tname = pid_to_name.get(target_id, str(target_id))
             mvp_lines.append(f"👑 **Successful Turn:** {aname} converted {tname} to the wolf pack")
@@ -13586,6 +14548,9 @@ async def assign_victors(interaction: discord.Interaction, winning_team: str):
             f"# 🎭 The game is over.\n**{win_label}** — roles are now revealed. Discuss freely.",
             embed=reveal_embed)
         await reveal_ch.send(embed=mvp_embed)
+
+        # ── Full Game Summary — Night actions and day votes ──────────────
+        await _post_game_summary(reveal_ch, interaction.guild, guild_id, pid_to_name)
 
     reveal_note = f"Role reveal posted to {reveal_ch.mention}." if reveal_ch else "⚠️ No channel found for role reveal."
     await interaction.followup.send(
@@ -14128,7 +15093,7 @@ def build_tracker_embed(guild, guild_id, owner_id, show_dead=True, sort_by_suspi
         if vtfm_entries:
             vtfm_parts = []
             for day_num, voted_at, change_count in sorted(vtfm_entries, key=lambda x: x[0]):
-                ts   = f"<t:{voted_at}:t>" if voted_at else ""
+                ts   = f"<t:{voted_at}:t>" if voted_at and voted_at > 0 else ""
                 flip = f" *(flip #{change_count})*" if change_count > 0 else ""
                 vtfm_parts.append(f"D{day_num}{' ' + ts if ts else ''}{flip}")
             vtfm_str = ", ".join(vtfm_parts)
@@ -14140,7 +15105,7 @@ def build_tracker_embed(guild, guild_id, owner_id, show_dead=True, sort_by_suspi
         if ivtf_entries:
             ivtf_parts = []
             for day_num, voted_at, change_count in sorted(ivtf_entries, key=lambda x: x[0]):
-                ts   = f"<t:{voted_at}:t>" if voted_at else ""
+                ts   = f"<t:{voted_at}:t>" if voted_at and voted_at > 0 else ""
                 flip = f" *(flip #{change_count})*" if change_count > 0 else ""
                 ivtf_parts.append(f"D{day_num}{' ' + ts if ts else ''}{flip}")
             ivtf_str = ", ".join(ivtf_parts)
@@ -14180,9 +15145,24 @@ async def _refresh_tracker_embed(guild, guild_id, owner_id, ch_id, msg_id):
     try:
         ch = guild.get_channel(ch_id) or guild.get_thread(ch_id)
         if not ch:
-            ch = await guild.fetch_channel(ch_id)
+            try:
+                ch = await guild.fetch_channel(ch_id)
+            except Exception:
+                # Try fetching as a thread
+                try:
+                    ch = await guild.fetch_channel(ch_id)
+                except Exception as e:
+                    print(f"[tracker] channel/thread {ch_id} not found: {e}")
+                    return
+        # If it's an archived thread, unarchive it first
+        if hasattr(ch, 'archived') and ch.archived:
+            try:
+                await ch.edit(archived=False)
+            except Exception:
+                pass
         msg = await ch.fetch_message(msg_id)
-        await msg.edit(embed=build_tracker_embed(guild, guild_id, owner_id))
+        await msg.edit(embed=build_tracker_embed(guild, guild_id, owner_id),
+                       view=TrackerMainView(guild_id, owner_id, msg_id, ch_id))
     except Exception as e:
         print(f"[tracker] embed refresh failed: {e}")
 
@@ -14245,13 +15225,15 @@ class TrackerRoleView(View):
 
         # Prev button
         if page > 0:
-            prev_btn = Button(label="◀ Prev", style=discord.ButtonStyle.secondary, row=1)
+            prev_btn = Button(label="◀ Prev", style=discord.ButtonStyle.secondary, row=1,
+                              custom_id=f"tr_prev_{guild_id}_{owner_id}_{target_id}_{page}")
             prev_btn.callback = self.on_prev
             self.add_item(prev_btn)
 
         # Next button
         if end < len(self.role_names):
-            next_btn = Button(label="Next ▶", style=discord.ButtonStyle.secondary, row=1)
+            next_btn = Button(label="Next ▶", style=discord.ButtonStyle.secondary, row=1,
+                              custom_id=f"tr_next_{guild_id}_{owner_id}_{target_id}_{page}")
             next_btn.callback = self.on_next
             self.add_item(next_btn)
 
@@ -14358,7 +15340,8 @@ class TrackerPlayerSelectView(View):
                 label = f"{name}{dead_mark}"[:100],
                 value = str(pid)))
         if opts:
-            sel = Select(placeholder="Choose a player...", options=opts[:25])
+            sel = Select(placeholder="Choose a player...", options=opts[:25],
+                         custom_id=f"tr_pick_{guild_id}_{owner_id}_{mode}")
             sel.callback = self.on_select
             self.add_item(sel)
 
@@ -14451,12 +15434,12 @@ class TrackerMainView(View):
         self.ch_id          = ch_id
 
         sus_btn   = Button(label="🔴 Suspicion",        style=discord.ButtonStyle.danger,    custom_id=f"tr_sus_{self.guild_id}_{self.owner_id}",    row=0)
-        rol_btn   = Button(label="🎭 Suspected Role",    style=discord.ButtonStyle.blurple,   row=0)
-        not_btn   = Button(label="📝 Add Note",          style=discord.ButtonStyle.secondary, row=0)
-        clr_btn   = Button(label="🗑️ Clear Note",       style=discord.ButtonStyle.secondary, row=0)
-        ref_btn   = Button(label="🔄 Refresh",           style=discord.ButtonStyle.secondary, row=1)
-        vhx_btn   = Button(label="📜 Full Vote History", style=discord.ButtonStyle.secondary, row=1)
-        shr_btn   = Button(label="📢 Share to Village",  style=discord.ButtonStyle.green,    custom_id=f"tr_shr_{self.guild_id}_{self.owner_id}",     row=1)
+        rol_btn   = Button(label="🎭 Suspected Role",    style=discord.ButtonStyle.blurple,   custom_id=f"tr_rol_{self.guild_id}_{self.owner_id}",    row=0)
+        not_btn   = Button(label="📝 Add Note",          style=discord.ButtonStyle.secondary, custom_id=f"tr_not_{self.guild_id}_{self.owner_id}",    row=0)
+        clr_btn   = Button(label="🗑️ Clear Note",       style=discord.ButtonStyle.secondary, custom_id=f"tr_clr_{self.guild_id}_{self.owner_id}",    row=0)
+        ref_btn   = Button(label="🔄 Refresh",           style=discord.ButtonStyle.secondary, custom_id=f"tr_ref_{self.guild_id}_{self.owner_id}",    row=1)
+        vhx_btn   = Button(label="📜 Full Vote History", style=discord.ButtonStyle.secondary, custom_id=f"tr_vhx_{self.guild_id}_{self.owner_id}",    row=1)
+        shr_btn   = Button(label="📢 Share to Village",  style=discord.ButtonStyle.green,     custom_id=f"tr_shr_{self.guild_id}_{self.owner_id}",    row=1)
 
         sus_btn.callback = self.on_suspicion
         rol_btn.callback = self.on_role
