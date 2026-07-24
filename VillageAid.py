@@ -6045,6 +6045,9 @@ class ReputationVoteView(View):
         db_add_reputation_vote(self.guild_id, self.voter_id, pid, "most_helpful", self.game_num)
         await interaction.response.send_message(
             f"✅ Voted **{tname}** for 🤝 Most Helpful!", ephemeral=True)
+
+
+async def _npc_morning_reactions(guild, guild_id: int, night_num: int, deaths: list):
     """NPCs react to the morning — surviving the night, deaths, game state."""
     if not game_active(guild_id):
         return
