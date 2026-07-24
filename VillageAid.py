@@ -315,6 +315,60 @@ def init_db():
                     used_at       INTEGER DEFAULT 0,
                     PRIMARY KEY (guild_id, player_id, token_type)
                  )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS reputation (
+                    guild_id      INTEGER,
+                    voter_id      INTEGER,
+                    target_id     INTEGER,
+                    category      TEXT,
+                    game_num      INTEGER DEFAULT 0,
+                    PRIMARY KEY (guild_id, voter_id, target_id, category, game_num)
+                 )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS reputation_totals (
+                    guild_id      INTEGER,
+                    player_id     INTEGER,
+                    best_liar     INTEGER DEFAULT 0,
+                    most_helpful  INTEGER DEFAULT 0,
+                    PRIMARY KEY (guild_id, player_id)
+                 )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS prophecies (
+                    guild_id      INTEGER,
+                    player_id     INTEGER,
+                    wolf_guess    INTEGER,
+                    first_death   INTEGER,
+                    winner        TEXT,
+                    submitted_at  INTEGER DEFAULT 0,
+                    PRIMARY KEY (guild_id, player_id)
+                 )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS bounties (
+                    guild_id      INTEGER,
+                    player_id     INTEGER,
+                    bounty_type   TEXT,
+                    target_id     INTEGER DEFAULT 0,
+                    target_role   TEXT DEFAULT "",
+                    completed     INTEGER DEFAULT 0,
+                    PRIMARY KEY (guild_id, player_id, bounty_type)
+                 )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS spectator_predictions (
+                    guild_id      INTEGER,
+                    player_id     INTEGER,
+                    pred_type     TEXT,
+                    prediction    TEXT,
+                    points_bet    INTEGER DEFAULT 10,
+                    correct       INTEGER DEFAULT 0,
+                    PRIMARY KEY (guild_id, player_id, pred_type)
+                 )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS spectator_points (
+                    guild_id      INTEGER,
+                    player_id     INTEGER,
+                    points        INTEGER DEFAULT 100,
+                    PRIMARY KEY (guild_id, player_id)
+                 )''')
     try:
         c.execute("ALTER TABLE elimination_log ADD COLUMN elim_type TEXT DEFAULT 'unknown'")
     except Exception:
@@ -582,7 +636,19 @@ def init_db():
     except Exception:
         pass
     try:
-        c.execute("ALTER TABLE game_state ADD COLUMN disney_mode INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE game_state ADD COLUMN shadow_token_target INTEGER DEFAULT NULL")
+    except Exception:
+        pass
+    try:
+        c.execute("ALTER TABLE game_state ADD COLUMN shadow_token_owner INTEGER DEFAULT NULL")
+    except Exception:
+        pass
+    try:
+        c.execute("ALTER TABLE game_state ADD COLUMN decoy_token_target INTEGER DEFAULT NULL")
+    except Exception:
+        pass
+    try:
+        c.execute("ALTER TABLE game_state ADD COLUMN decoy_token_owner INTEGER DEFAULT NULL")
     except Exception:
         pass
     try:
@@ -3334,12 +3400,12 @@ async def challenge_close(interaction: discord.Interaction):
     app_commands.Choice(name="💊 Save — protect any player from wolf kill",       value="save"),
     app_commands.Choice(name="🤫 Silence — force a player to abstain",            value="silence"),
     app_commands.Choice(name="🎭 Reveal — force alignment reveal",                value="reveal"),
-    app_commands.Choice(name="📜 History — see a player's full vote history",     value="history"),
-    app_commands.Choice(name="🔔 Alert — notified when a player votes for you",   value="alert"),
+    app_commands.Choice(name="🌀 Swap — scramble all roles among alive players",  value="swap"),
+    app_commands.Choice(name="🎪 Decoy — you choose wolf kill target tonight",    value="decoy"),
+    app_commands.Choice(name="🕵️ Shadow — follow a player for one night",         value="shadow"),
     app_commands.Choice(name="🕊️ Pardon — saved from elimination once",           value="pardon"),
     app_commands.Choice(name="📣 Broadcast — anonymous message to village",       value="broadcast"),
     app_commands.Choice(name="🎰 Gamble — learn a wolf OR reveal your role",      value="gamble"),
-    app_commands.Choice(name="⚰️ Grave — final message if eliminated",            value="grave"),
     app_commands.Choice(name="🪞 Mirror — reflect wolf kill back at attacker",    value="mirror"),
     app_commands.Choice(name="🃏 Wild — mystery token",                           value="wild"),
 ])
@@ -3422,12 +3488,12 @@ async def my_tokens(interaction: discord.Interaction):
     app_commands.Choice(name="💊 Save",        value="save"),
     app_commands.Choice(name="🤫 Silence",     value="silence"),
     app_commands.Choice(name="🎭 Reveal",      value="reveal"),
-    app_commands.Choice(name="📜 History",     value="history"),
-    app_commands.Choice(name="🔔 Alert",       value="alert"),
+    app_commands.Choice(name="🌀 Swap",        value="swap"),
+    app_commands.Choice(name="🎪 Decoy",       value="decoy"),
+    app_commands.Choice(name="🕵️ Shadow",      value="shadow"),
     app_commands.Choice(name="🕊️ Pardon",     value="pardon"),
     app_commands.Choice(name="📣 Broadcast",   value="broadcast"),
     app_commands.Choice(name="🎰 Gamble",      value="gamble"),
-    app_commands.Choice(name="⚰️ Grave",       value="grave"),
     app_commands.Choice(name="🪞 Mirror",      value="mirror"),
     app_commands.Choice(name="🃏 Wild",        value="wild"),
 ])
@@ -3440,16 +3506,81 @@ async def use_token(interaction: discord.Interaction, token_type: str):
 
     token = TOKENS.get(token_type, {})
 
-    # Tokens that need a target — show a confirmation view
-    if token_type in ("peek", "save", "silence", "reveal", "history", "alert"):
+    # Tokens that need a target — show a target selector
+    if token_type in ("peek", "save", "silence", "reveal", "shadow", "decoy"):
         view = TokenTargetView(interaction.guild_id, interaction.user.id, token_type)
         await interaction.followup.send(
             f"**{token['emoji']} {token['name']}** — Choose your target:",
             view=view, ephemeral=True)
 
+    elif token_type == "swap":
+        # Scramble all alive player roles
+        if not db_use_token(interaction.guild_id, interaction.user.id, "swap"):
+            return await interaction.followup.send("❌ Token already used.", ephemeral=True)
+
+        rows  = db_get_assignments(interaction.guild_id)
+        alive = [r for r in rows if r[2] == 1]
+        if len(alive) < 2:
+            return await interaction.followup.send(
+                "❌ Not enough alive players to scramble roles.", ephemeral=True)
+
+        import random as _rand
+        roles_pool = [r[1] for r in alive]
+        _rand.shuffle(roles_pool)
+
+        font   = get_guild_font(interaction.guild_id)
+        disney = is_disney_mode(interaction.guild_id)
+        hp     = is_hp_mode(interaction.guild_id)
+
+        conn_sw = sqlite3.connect(DB_FILE)
+        c_sw    = conn_sw.cursor()
+        for i, row in enumerate(alive):
+            pid      = row[0]
+            new_role = roles_pool[i]
+            c_sw.execute(
+                "UPDATE player_assignments SET role_name=? WHERE guild_id=? AND player_id=?",
+                (new_role, interaction.guild_id, pid))
+
+            # Send new role card to private channel
+            priv_ch = interaction.guild.get_channel(row[3]) if len(row) > 3 else None
+            if priv_ch:
+                role_info = get_role_info(interaction.guild_id, new_role)
+                member    = interaction.guild.get_member(pid)
+                if member and role_info:
+                    embed = build_role_card(member, new_role, role_info, font,
+                                            disney=disney, hp=hp)
+                    try:
+                        await priv_ch.send(
+                            f"🌀 **The Swap Token has been used!**\n"
+                            f"{member.mention} — your role has changed.\n"
+                            f"*Your new role card:*",
+                            embed=embed)
+                    except Exception as e:
+                        print(f"[swap_token] priv_ch send failed: {e}")
+        conn_sw.commit()
+        conn_sw.close()
+        invalidate_cache(interaction.guild_id)
+
+        # Announce publicly
+        state_sw = cached_get_state(interaction.guild_id) or {}
+        vc_ch    = interaction.guild.get_channel(state_sw.get("village_chat_ch_id") or 0)
+        if vc_ch:
+            await vc_ch.send(
+                "🌀 **The Swap Token has been activated!**\n"
+                "*All roles have been randomly reshuffled among the alive players.*\n"
+                "*Check your private channel for your new role card.*")
+
+        await post_mod_log(interaction.guild,
+            f"🌀 **Swap Token** used by {interaction.user.display_name} — "
+            f"all {len(alive)} alive players have been assigned new roles.")
+        await refresh_win_tracker(interaction.guild)
+        await interaction.followup.send(
+            f"🌀 Swap Token activated — {len(alive)} roles reshuffled. "
+            f"All players have received their new role cards.", ephemeral=True)
+
     elif token_type == "broadcast":
-        modal = BroadcastModal(interaction.guild_id, interaction.user.id)
-        await interaction.response.send_modal(modal)
+        await interaction.response.send_modal(
+            BroadcastModal(interaction.guild_id, interaction.user.id))
 
     elif token_type == "gamble":
         # Flip a coin
@@ -3545,35 +3676,50 @@ class TokenTargetView(View):
                 "❌ Token already used.", ephemeral=True)
 
         if self.token_type == "peek":
-            team = get_team(self.guild_id, next(
+            team    = get_team(self.guild_id, next(
                 (r[1] for r in db_get_assignments(self.guild_id) if r[0] == target_id), ""))
             is_wolf = team == "wolf"
             await interaction.response.send_message(
                 f"🔍 **Peek result:** Is **{tname}** on the wolf team?\n"
                 f"**{'Yes 🐺' if is_wolf else 'No ✅'}**", ephemeral=True)
 
-        elif self.token_type == "history":
-            vote_hist = db_get_vote_history(self.guild_id)
-            lines = []
-            for row in vote_hist:
-                day_num, voter_id, vtarget_id, action = row[0], row[1], row[2], row[3]
-                if voter_id == target_id:
-                    vtarget = interaction.guild.get_member(vtarget_id)
-                    vtname  = vtarget.display_name if vtarget else str(vtarget_id)
-                    changed = " *(changed)*" if action == "change" else ""
-                    lines.append(f"Day {day_num}: voted **{vtname}**{changed}")
-            result = "\n".join(lines) if lines else "*No votes on record.*"
+        elif self.token_type == "shadow":
+            # Store shadow target in DB state — resolved at next phase
+            db_set_state(self.guild_id, **{"shadow_token_target": target_id,
+                                            "shadow_token_owner":  interaction.user.id})
             await interaction.response.send_message(
-                f"📜 **{tname}'s vote history:**\n{result}", ephemeral=True)
+                f"🕵️ **Shadow Token activated.** You are now following **{tname}** tonight.\n"
+                f"*A full report will be delivered to your private channel at dawn.*",
+                ephemeral=True)
+            await post_mod_log(interaction.guild,
+                f"🕵️ **Shadow Token** — {interaction.user.display_name} is shadowing **{tname}** tonight.")
+
+        elif self.token_type == "decoy":
+            # Override wolf kill target — stored in state, applied during resolve_night
+            db_set_state(self.guild_id, **{"decoy_token_target": target_id,
+                                            "decoy_token_owner":  interaction.user.id})
+            night_num = db_get_night_num(self.guild_id)
+            # Record as a wolf vote override
+            await interaction.response.send_message(
+                f"🎪 **Decoy Token activated.** The wolf kill will be redirected to **{tname}** tonight.\n"
+                f"*The den will not know their vote was overridden.*",
+                ephemeral=True)
+            await post_mod_log(interaction.guild,
+                f"🎪 **Decoy Token** — {interaction.user.display_name} redirected wolf kill to **{tname}** tonight.\n"
+                f"⚠️ Override the wolf kill target manually when resolving Night {night_num}.")
 
         else:
             await interaction.response.send_message(
                 f"✅ **{token.get('emoji','')} {token.get('name','')}** activated on **{tname}**.\n"
                 f"The mod has been notified.", ephemeral=True)
+            await post_mod_log(interaction.guild,
+                f"🎒 **{token.get('name', self.token_type)} used** — "
+                f"{interaction.user.display_name} → target: {tname}")
 
-        await post_mod_log(interaction.guild,
-            f"🎒 **{TOKENS.get(self.token_type, {}).get('name', self.token_type)} used** — "
-            f"{interaction.user.display_name} → target: {tname}")
+        if self.token_type not in ("shadow", "decoy"):
+            await post_mod_log(interaction.guild,
+                f"🎒 **{TOKENS.get(self.token_type, {}).get('name', self.token_type)} used** — "
+                f"{interaction.user.display_name} → target: {tname}")
         self.stop()
 
 
@@ -5273,6 +5419,8 @@ async def _run_start_day(guild, guild_id, night_num, state):
     # Vote countdown reminder and night approach warning
     safe_task(_vote_countdown_reminder(guild, guild_id, int(end_ts)), "vote_reminder")
     safe_task(_night_approach_warning(guild, guild_id), "night_warning")
+    # Daily Rumor Mill — AI-generated cryptic hint based on last night's actions
+    safe_task(_post_rumor_mill(guild, guild_id, night_num), "rumor_mill")
 
 
 
@@ -5281,7 +5429,622 @@ async def _run_start_day(guild, guild_id, night_num, state):
 
 
 
-async def _npc_morning_reactions(guild, guild_id: int, night_num: int, deaths: list):
+async def _post_rumor_mill(guild, guild_id: int, night_num: int):
+    """Generate and post one cryptic rumor based on last night's actions."""
+    if not game_active(guild_id):
+        return
+    state = cached_get_state(guild_id) or {}
+    vc_ch = guild.get_channel(state.get("village_chat_ch_id") or 0)
+    if not vc_ch:
+        return
+
+    actions = db_get_night_actions(guild_id, night_num)
+    rows    = db_get_assignments(guild_id)
+    disney  = bool(state.get("disney_mode", 0))
+    hp      = bool(state.get("hp_mode", 0))
+
+    if not actions:
+        return
+
+    # Build a sanitised action summary for Claude — no role names, just events
+    action_lines = []
+    for actor_id, action_type, target_id in actions:
+        if action_type.startswith("_"):
+            continue
+        action_lines.append(f"- {action_type} action was taken")
+
+    if not action_lines:
+        return
+
+    if disney:
+        setting = "the Enchanted Kingdom"
+        tone    = "fairy-tale and slightly ominous, like a dark Disney narrator"
+    elif hp:
+        setting = "Hogwarts"
+        tone    = "like a mysterious Daily Prophet snippet or overheard hallway whisper"
+    else:
+        setting = "Whisperfall"
+        tone    = "dark, literary, and atmospheric — like a Whisperfall blood board"
+
+    prompt = (
+        f"You are generating the daily Rumor Mill for {setting} — a social deduction game.\n\n"
+        f"Last night these things happened:\n"
+        + "\n".join(action_lines) +
+        f"\n\nWrite ONE cryptic rumor that hints at what happened last night. "
+        f"Rules:\n"
+        f"- Never name any specific role or player\n"
+        f"- Be ambiguous enough that it could be interpreted multiple ways\n"
+        f"- It should feel like gossip or a rumor, not a fact\n"
+        f"- Tone: {tone}\n"
+        f"- Length: 1-3 sentences maximum\n"
+        f"- Start with something like 'Word has it...', 'Whispers say...', 'It is said...', "
+        f"'Someone overheard...', 'A shadow was seen...', etc.\n"
+        f"- Make it genuinely ambiguous — players should debate whether it is real or a red herring"
+    )
+    system = (
+        f"You write cryptic one-paragraph rumors for {setting}, a social deduction game. "
+        f"Never reveal roles or names. Always be ambiguous."
+    )
+
+    try:
+        rumor = await _claude(prompt, system, max_tokens=120)
+        if not rumor:
+            return
+
+        if disney:
+            title = "📰 Kingdom Gossip"
+            color = 0xF39C12
+        elif hp:
+            title = "📰 Daily Prophet Snippet"
+            color = 0x8B0000
+        else:
+            title = "📰 Rumor Mill"
+            color = 0x2C3060
+
+        embed = discord.Embed(
+            title       = title,
+            description = f"*{rumor.strip()}*",
+            color       = color
+        )
+        embed.set_footer(text="This may be truth. It may be nothing. Whisperfall never says.")
+        await vc_ch.send(embed=embed)
+    except Exception as e:
+        print(f"[rumor_mill] failed: {e}")
+
+
+async def _assign_bounties(guild, guild_id: int):
+    """Assign secret bounties to all players at game start."""
+    import random as _rand
+    rows  = db_get_assignments(guild_id)
+    alive = [r for r in rows if r[2] == 1]
+    wolves   = [r for r in alive if get_team(guild_id, r[1]) == "wolf"]
+    villagers = [r for r in alive if get_team(guild_id, r[1]) == "village"]
+    wolf_roles = list({r[1] for r in wolves})
+
+    db_clear_bounties(guild_id)
+
+    for r in wolves:
+        pid = r[0]
+        # Wolf bounty: kill a specific wolf role
+        if wolf_roles:
+            target_role = _rand.choice(wolf_roles)
+            db_set_bounty(guild_id, pid, "wolf_kill_role", target_role=target_role)
+
+        # Send to private channel
+        priv_ch = guild.get_channel(r[3]) if len(r) > 3 else None
+        if priv_ch:
+            m = guild.get_member(pid)
+            embed = discord.Embed(
+                title       = "🎯 Your Bounty",
+                description = (
+                    f"**Wolf Bounty:** Make sure a **{target_role}** gets wolf-killed this game.\n\n"
+                    f"*Complete your bounty to earn a bonus token for the next game.*\n"
+                    f"*Use `/my_bounties` to check your progress.*"
+                ),
+                color = 0xC0392B
+            )
+            try:
+                await priv_ch.send(embed=embed)
+            except Exception:
+                pass
+
+    for r in villagers:
+        pid   = r[0]
+        quests = []
+
+        # Quest 1: Never change your vote all game
+        db_set_bounty(guild_id, pid, "never_change_vote")
+        quests.append("**Quest 1:** Never change your vote all game.")
+
+        # Quest 2: Keep a specific player alive to Day 3
+        others = [v for v in villagers if v[0] != pid]
+        if others:
+            target_row = _rand.choice(others)
+            target_m   = guild.get_member(target_row[0])
+            target_nm  = target_m.display_name if target_m else str(target_row[0])
+            db_set_bounty(guild_id, pid, "keep_alive_day3", target_id=target_row[0])
+            quests.append(f"**Quest 2:** Keep **{target_nm}** alive until Day 3.")
+
+        priv_ch = guild.get_channel(r[3]) if len(r) > 3 else None
+        if priv_ch:
+            embed = discord.Embed(
+                title       = "🎯 Your Quests",
+                description = (
+                    "\n".join(quests) +
+                    "\n\n*Complete quests to earn bonus tokens for the next game.*\n"
+                    "*Use `/my_bounties` to check your progress.*"
+                ),
+                color = 0x27AE60
+            )
+            try:
+                await priv_ch.send(embed=embed)
+            except Exception:
+                pass
+
+
+async def _check_bounty_completion(guild, guild_id: int):
+    """Called at assign_victors — checks all bounties and awards tokens."""
+    rows     = db_get_assignments(guild_id)
+    elim_log = db_get_elimination_log(guild_id)
+    vote_hist = db_get_vote_history(guild_id)
+
+    # Who changed their vote?
+    changed_voters = {row[1] for row in vote_hist if row[3] == "change"}
+
+    # Who died before Day 3?
+    died_before_day3 = set()
+    for pid, role_n, reason, elim_type, day_or_night, _ in elim_log:
+        if day_or_night < 3:
+            died_before_day3.add(pid)
+
+    # What wolf roles were wolf-killed?
+    wolf_killed_roles = set()
+    for pid, role_n, reason, elim_type, day_or_night, _ in elim_log:
+        if elim_type in ("wolf_kill", "werekitten", "shadow_wolf", "white_wolf"):
+            wolf_killed_roles.add(role_n)
+
+    winners = []
+    for r in rows:
+        pid     = r[0]
+        bounties = db_get_bounties(guild_id, pid)
+        for bounty_type, target_id, target_role, completed in bounties:
+            if completed:
+                continue
+            earned = False
+
+            if bounty_type == "wolf_kill_role" and target_role in wolf_killed_roles:
+                earned = True
+            elif bounty_type == "never_change_vote" and pid not in changed_voters:
+                earned = True
+            elif bounty_type == "keep_alive_day3" and target_id not in died_before_day3:
+                earned = True
+
+            if earned:
+                db_complete_bounty(guild_id, pid, bounty_type)
+                db_award_token(guild_id, pid, "wild")  # Award a Wild token
+                winners.append((pid, bounty_type))
+
+                # Notify in private channel
+                priv_row = next((row for row in rows if row[0] == pid), None)
+                priv_ch  = guild.get_channel(priv_row[3]) if priv_row and len(priv_row) > 3 else None
+                if priv_ch:
+                    m = guild.get_member(pid)
+                    label = {
+                        "wolf_kill_role":    f"A {target_role} was wolf-killed ✅",
+                        "never_change_vote": "You never changed your vote ✅",
+                        "keep_alive_day3":   "Your protected player survived to Day 3 ✅",
+                    }.get(bounty_type, bounty_type)
+                    try:
+                        await priv_ch.send(
+                            f"🎯 **Bounty/Quest Complete!**\n{label}\n"
+                            f"You've been awarded a **🃏 Wild Token** for the next game!")
+                    except Exception:
+                        pass
+
+    return winners
+
+
+async def _resolve_prophecies(guild, guild_id: int, winning_team: str):
+    """Called at assign_victors — check prophecies and award tokens for correct ones."""
+    prophecies = db_get_prophecies(guild_id)
+    if not prophecies:
+        return []
+
+    rows     = db_get_assignments(guild_id)
+    elim_log = db_get_elimination_log(guild_id)
+
+    # First death
+    first_death_pid = elim_log[0][0] if elim_log else None
+
+    winners = []
+    correct_entries = []
+
+    for player_id, wolf_guess, first_death, winner_guess in prophecies:
+        correct = []
+
+        # Check wolf guess
+        wolf_row = next((r for r in rows if r[0] == wolf_guess), None)
+        if wolf_row and get_team(guild_id, wolf_row[1]) == "wolf":
+            correct.append(f"🐺 Correctly identified a wolf")
+
+        # Check first death
+        if first_death == first_death_pid:
+            correct.append(f"💀 Correctly predicted the first death")
+
+        # Check winner
+        if winner_guess == winning_team:
+            correct.append(f"🏆 Correctly predicted the winner")
+
+        if correct:
+            db_award_token(guild_id, player_id, "wild")
+            winners.append(player_id)
+            priv_row = next((r for r in rows if r[0] == player_id), None)
+            priv_ch  = guild.get_channel(priv_row[3]) if priv_row and len(priv_row) > 3 else None
+            if priv_ch:
+                m = guild.get_member(player_id)
+                try:
+                    await priv_ch.send(
+                        f"🔮 **Your prophecy came true!**\n" +
+                        "\n".join(correct) +
+                        f"\n\nYou've been awarded a **🃏 Wild Token** for the next game!")
+                except Exception:
+                    pass
+            correct_entries.append((player_id, correct))
+
+    db_clear_prophecies(guild_id)
+    return correct_entries
+
+
+async def _resolve_spectator_predictions(guild, guild_id: int, winning_team: str):
+    """Called at assign_victors — award/deduct spectator points."""
+    preds    = db_get_spectator_predictions(guild_id)
+    rows     = db_get_assignments(guild_id)
+    elim_log = db_get_elimination_log(guild_id)
+    first_death_pid = elim_log[0][0] if elim_log else None
+
+    results = {}
+    for player_id, pred_type, prediction, points_bet, _ in preds:
+        correct = False
+        if pred_type == "first_death":
+            try:
+                pred_pid = int(prediction)
+                correct  = pred_pid == first_death_pid
+            except Exception:
+                pass
+        elif pred_type == "winner":
+            correct = prediction == winning_team
+        elif pred_type == "wolf_guess":
+            try:
+                pred_pid = int(prediction)
+                wolf_row = next((r for r in rows if r[0] == pred_pid), None)
+                correct  = bool(wolf_row and get_team(guild_id, wolf_row[1]) == "wolf")
+            except Exception:
+                pass
+
+        delta = points_bet if correct else -points_bet
+        db_add_spectator_points(guild_id, player_id, delta)
+        results[player_id] = (correct, delta)
+
+    return results
+
+
+# ── New commands ──────────────────────────────────────────────────────────
+
+@tree.command(name="prophecy", description="Submit your anonymous game prediction before Night 1 ends")
+@app_commands.describe(
+    wolf_guess  = "Who do you think is a wolf?",
+    first_death = "Who do you think will die first?",
+    winner      = "Who do you think will win?"
+)
+@app_commands.choices(winner=[
+    app_commands.Choice(name="🏘️ Village", value="village"),
+    app_commands.Choice(name="🐺 Wolves",  value="wolf"),
+    app_commands.Choice(name="⚖️ Neutral", value="neutral"),
+])
+async def prophecy_cmd(interaction: discord.Interaction,
+                       wolf_guess: discord.Member,
+                       first_death: discord.Member,
+                       winner: str):
+    await interaction.response.defer(ephemeral=True)
+    if not game_active(interaction.guild_id):
+        return await interaction.followup.send("❌ No active game.", ephemeral=True)
+
+    night_num = db_get_night_num(interaction.guild_id)
+    if night_num > 1:
+        return await interaction.followup.send(
+            "❌ Prophecies can only be submitted before Night 1 ends.", ephemeral=True)
+
+    db_submit_prophecy(interaction.guild_id, interaction.user.id,
+                       wolf_guess.id, first_death.id, winner)
+    await interaction.followup.send(
+        f"🔮 **Prophecy submitted!**\n"
+        f"*Your predictions have been recorded anonymously.*\n"
+        f"*If any come true, you'll earn a bonus token at game end.*",
+        ephemeral=True)
+
+
+@tree.command(name="prophecy_board", description="Show all prophecies submitted (mod only — spoilers!)")
+@is_mod()
+async def prophecy_board_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    prophecies = db_get_prophecies(interaction.guild_id)
+    if not prophecies:
+        return await interaction.followup.send("No prophecies submitted.", ephemeral=True)
+
+    rows = db_get_assignments(interaction.guild_id)
+    lines = []
+    for player_id, wolf_guess, first_death, winner in prophecies:
+        m        = interaction.guild.get_member(player_id)
+        wg       = interaction.guild.get_member(wolf_guess)
+        fd       = interaction.guild.get_member(first_death)
+        pname    = m.display_name if m else str(player_id)
+        wgname   = wg.display_name if wg else str(wolf_guess)
+        fdname   = fd.display_name if fd else str(first_death)
+        lines.append(f"**{pname}:** Wolf={wgname} | First Death={fdname} | Winner={winner}")
+
+    embed = discord.Embed(
+        title       = "🔮 Prophecy Board",
+        description = "\n".join(lines),
+        color       = 0x2C3060
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@tree.command(name="my_bounties", description="Check your current quests and bounties")
+async def my_bounties_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    bounties = db_get_bounties(interaction.guild_id, interaction.user.id)
+    if not bounties:
+        return await interaction.followup.send(
+            "You have no active bounties. They are assigned at game start.", ephemeral=True)
+
+    rows = db_get_assignments(interaction.guild_id)
+    lines = []
+    for bounty_type, target_id, target_role, completed in bounties:
+        status = "✅ Complete!" if completed else "⏳ In progress"
+        if bounty_type == "wolf_kill_role":
+            lines.append(f"🎯 Make sure a **{target_role}** gets wolf-killed — {status}")
+        elif bounty_type == "never_change_vote":
+            lines.append(f"🗳️ Never change your vote all game — {status}")
+        elif bounty_type == "keep_alive_day3":
+            m = interaction.guild.get_member(target_id)
+            nm = m.display_name if m else str(target_id)
+            lines.append(f"🛡️ Keep **{nm}** alive until Day 3 — {status}")
+
+    embed = discord.Embed(
+        title       = "🎯 Your Bounties & Quests",
+        description = "\n".join(lines) + "\n\n*Complete these to earn a 🃏 Wild Token for the next game.*",
+        color       = 0xF39C12
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@tree.command(name="rate_players", description="Rate players after a game ends — Best Liar and Most Helpful")
+async def rate_players_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    rows = db_get_assignments(interaction.guild_id)
+    if not rows:
+        return await interaction.followup.send("No players to rate.", ephemeral=True)
+
+    others = [r for r in rows if r[0] != interaction.user.id]
+    if not others:
+        return await interaction.followup.send("No other players to rate.", ephemeral=True)
+
+    # Use game_num from stats if available
+    game_num = db_get_game_count(interaction.guild_id)
+    view = ReputationVoteView(interaction.guild_id, interaction.user.id, others, game_num)
+    embed = discord.Embed(
+        title       = "⭐ Rate Your Fellow Players",
+        description = (
+            "Vote for:\n"
+            "**🤥 Best Liar** — who fooled you the most?\n"
+            "**🤝 Most Helpful** — who helped the village the most?\n\n"
+            "*You cannot vote for yourself. Votes are tracked across all games.*"
+        ),
+        color = 0xF39C12
+    )
+    await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+
+
+@tree.command(name="reputation", description="See a player's reputation across all games")
+@app_commands.describe(player="Player to check (leave blank for yourself)")
+async def reputation_cmd(interaction: discord.Interaction, player: discord.Member = None):
+    await interaction.response.defer(ephemeral=True)
+    target   = player or interaction.user
+    liar, helpful = db_get_reputation(interaction.guild_id, target.id)
+    embed = discord.Embed(
+        title       = f"⭐ {target.display_name}'s Reputation",
+        description = (
+            f"🤥 **Best Liar votes:** {liar}\n"
+            f"🤝 **Most Helpful votes:** {helpful}\n\n"
+            f"*Voted by fellow players after each game.*"
+        ),
+        color = 0xF39C12
+    )
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+
+@tree.command(name="reputation_leaderboard", description="Show the server reputation leaderboard")
+async def reputation_leaderboard_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=False)
+    rows = db_get_reputation_leaderboard(interaction.guild_id)
+    if not rows:
+        return await interaction.followup.send("No reputation data yet.")
+
+    liar_lines    = []
+    helpful_lines = []
+    sorted_liar    = sorted(rows, key=lambda x: x[1], reverse=True)[:5]
+    sorted_helpful = sorted(rows, key=lambda x: x[2], reverse=True)[:5]
+
+    for pid, liar, helpful in sorted_liar:
+        m = interaction.guild.get_member(pid)
+        nm = m.display_name if m else str(pid)
+        liar_lines.append(f"**{nm}** — {liar} votes")
+
+    for pid, liar, helpful in sorted_helpful:
+        m = interaction.guild.get_member(pid)
+        nm = m.display_name if m else str(pid)
+        helpful_lines.append(f"**{nm}** — {helpful} votes")
+
+    embed = discord.Embed(title="⭐ Reputation Leaderboard", color=0xF39C12)
+    embed.add_field(name="🤥 Sneakiest Wolf (Best Liar)",
+                    value="\n".join(liar_lines) or "None yet", inline=False)
+    embed.add_field(name="🤝 Most Trustworthy (Most Helpful)",
+                    value="\n".join(helpful_lines) or "None yet", inline=False)
+    await interaction.followup.send(embed=embed)
+
+
+@tree.command(name="spectate_predict", description="Bet points on game outcomes (spectators only)")
+@app_commands.describe(
+    prediction_type = "What are you predicting?",
+    target          = "The player you're predicting about",
+    winner          = "Your winner prediction (only for winner prediction type)",
+    points          = "How many points to bet (10-50)"
+)
+@app_commands.choices(prediction_type=[
+    app_commands.Choice(name="💀 First Death — who dies first?",     value="first_death"),
+    app_commands.Choice(name="🐺 Wolf Guess — who is a wolf?",       value="wolf_guess"),
+    app_commands.Choice(name="🏆 Winner — who wins the game?",       value="winner"),
+])
+@app_commands.choices(winner=[
+    app_commands.Choice(name="🏘️ Village", value="village"),
+    app_commands.Choice(name="🐺 Wolves",  value="wolf"),
+    app_commands.Choice(name="⚖️ Neutral", value="neutral"),
+])
+async def spectate_predict_cmd(interaction: discord.Interaction,
+                                prediction_type: str,
+                                target: discord.Member = None,
+                                winner: str = None,
+                                points: int = 10):
+    await interaction.response.defer(ephemeral=True)
+
+    # Must be in spectator channel
+    state   = cached_get_state(interaction.guild_id) or {}
+    spec_ch = interaction.guild.get_channel(state.get("spectator_ch_id") or 0)
+    if not spec_ch or interaction.channel_id != spec_ch.id:
+        return await interaction.followup.send(
+            f"❌ This command can only be used in the spectator channel.", ephemeral=True)
+
+    if not game_active(interaction.guild_id):
+        return await interaction.followup.send("❌ No active game.", ephemeral=True)
+
+    points = max(10, min(50, points))
+
+    current_pts = db_get_spectator_points(interaction.guild_id, interaction.user.id)
+    if current_pts < points:
+        return await interaction.followup.send(
+            f"❌ Not enough points. You have **{current_pts}** points.", ephemeral=True)
+
+    if prediction_type == "winner":
+        if not winner:
+            return await interaction.followup.send("❌ Select a winner.", ephemeral=True)
+        prediction = winner
+        desc = f"**Winner:** {winner} will win"
+    elif prediction_type in ("first_death", "wolf_guess"):
+        if not target:
+            return await interaction.followup.send("❌ Select a player.", ephemeral=True)
+        prediction = str(target.id)
+        desc = f"**{'First Death' if prediction_type == 'first_death' else 'Wolf Guess'}:** {target.display_name}"
+    else:
+        return await interaction.followup.send("❌ Invalid prediction type.", ephemeral=True)
+
+    db_submit_spectator_prediction(interaction.guild_id, interaction.user.id,
+                                    prediction_type, prediction, points)
+    db_add_spectator_points(interaction.guild_id, interaction.user.id, -points)
+
+    remaining = db_get_spectator_points(interaction.guild_id, interaction.user.id)
+    await interaction.followup.send(
+        f"🎲 **Prediction placed!**\n{desc}\n"
+        f"**{points}** points wagered. Remaining: **{remaining}** points.\n"
+        f"*Correct predictions double your bet. Wrong ones lose it.*",
+        ephemeral=True)
+
+    # Post anonymously to spectator channel
+    embed = discord.Embed(
+        description = f"*A spectator has placed a prediction: {desc} — {points} pts wagered*",
+        color       = 0x2C3060
+    )
+    embed.set_footer(text="Use /spectate_predict to place your own prediction")
+    await spec_ch.send(embed=embed)
+
+
+@tree.command(name="spectator_leaderboard", description="Show the spectator prediction leaderboard")
+async def spectator_leaderboard_cmd(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=False)
+    rows = db_get_spectator_leaderboard(interaction.guild_id)
+    if not rows:
+        return await interaction.followup.send("No spectator data yet.")
+
+    lines = []
+    medals = ["🥇", "🥈", "🥉"]
+    for i, (pid, pts) in enumerate(rows):
+        m  = interaction.guild.get_member(pid)
+        nm = m.display_name if m else str(pid)
+        medal = medals[i] if i < 3 else f"{i+1}."
+        lines.append(f"{medal} **{nm}** — {pts} points")
+
+    embed = discord.Embed(
+        title       = "🎲 Spectator Prediction Leaderboard",
+        description = "\n".join(lines),
+        color       = 0x2C3060
+    )
+    embed.set_footer(text="Earn points by correctly predicting game outcomes")
+    await interaction.followup.send(embed=embed)
+
+
+class ReputationVoteView(View):
+    def __init__(self, guild_id, voter_id, players, game_num):
+        super().__init__(timeout=300)
+        self.guild_id  = guild_id
+        self.voter_id  = voter_id
+        self.game_num  = game_num
+        self.liar_voted    = False
+        self.helpful_voted = False
+
+        # Best Liar dropdown
+        liar_opts = [discord.SelectOption(
+            label=f"🤥 {self._name(p[0])}",
+            value=f"liar_{p[0]}") for p in players[:25]]
+        liar_sel = Select(placeholder="🤥 Best Liar — who fooled you most?",
+                          options=liar_opts,
+                          custom_id=f"rep_liar_{guild_id}_{voter_id}")
+        liar_sel.callback = self.on_liar
+        self.add_item(liar_sel)
+
+        # Most Helpful dropdown
+        helpful_opts = [discord.SelectOption(
+            label=f"🤝 {self._name(p[0])}",
+            value=f"helpful_{p[0]}") for p in players[:25]]
+        helpful_sel = Select(placeholder="🤝 Most Helpful — who helped most?",
+                             options=helpful_opts,
+                             custom_id=f"rep_helpful_{guild_id}_{voter_id}")
+        helpful_sel.callback = self.on_helpful
+        self.add_item(helpful_sel)
+
+    def _name(self, pid):
+        return str(pid)  # Will show ID — actual name resolved at callback time
+
+    async def on_liar(self, interaction: discord.Interaction):
+        val    = interaction.data["values"][0]
+        pid    = int(val.split("_")[1])
+        target = interaction.guild.get_member(pid)
+        tname  = target.display_name if target else str(pid)
+        if db_already_voted_reputation(self.guild_id, self.voter_id, self.game_num, "best_liar"):
+            return await interaction.response.send_message("❌ Already voted for Best Liar.", ephemeral=True)
+        db_add_reputation_vote(self.guild_id, self.voter_id, pid, "best_liar", self.game_num)
+        await interaction.response.send_message(
+            f"✅ Voted **{tname}** for 🤥 Best Liar!", ephemeral=True)
+
+    async def on_helpful(self, interaction: discord.Interaction):
+        val    = interaction.data["values"][0]
+        pid    = int(val.split("_")[1])
+        target = interaction.guild.get_member(pid)
+        tname  = target.display_name if target else str(pid)
+        if db_already_voted_reputation(self.guild_id, self.voter_id, self.game_num, "most_helpful"):
+            return await interaction.response.send_message("❌ Already voted for Most Helpful.", ephemeral=True)
+        db_add_reputation_vote(self.guild_id, self.voter_id, pid, "most_helpful", self.game_num)
+        await interaction.response.send_message(
+            f"✅ Voted **{tname}** for 🤝 Most Helpful!", ephemeral=True)
     """NPCs react to the morning — surviving the night, deaths, game state."""
     if not game_active(guild_id):
         return
@@ -9118,14 +9881,14 @@ TOKENS = {
     "save":         {"emoji": "💊",  "name": "Save Token",           "desc": "Protect any player of your choosing from the next wolf kill."},
     "silence":      {"emoji": "🤫",  "name": "Silence Token",        "desc": "Force one player to abstain from the next day vote. Mod executes it."},
     "reveal":       {"emoji": "🎭",  "name": "Reveal Token",         "desc": "Force one player to publicly confirm whether they are village or wolf-aligned."},
-    "history":      {"emoji": "📜",  "name": "History Token",        "desc": "See the full vote history of one player across all days including every change."},
-    "alert":        {"emoji": "🔔",  "name": "Alert Token",          "desc": "You are privately notified the next time a specific player votes for you."},
+    "swap":         {"emoji": "🌀",  "name": "Swap Token",           "desc": "All roles in the game are randomly reshuffled among alive players. Everyone wakes up as someone new. Complete chaos."},
+    "decoy":        {"emoji": "🎪",  "name": "Decoy Token",          "desc": "For one night you secretly choose the wolf kill target instead of the den. The den believes they chose normally."},
+    "shadow":       {"emoji": "🕵️",  "name": "Shadow Token",         "desc": "Follow one player for one night. You learn every action taken against them and by them. Full report delivered at dawn."},
     "pardon":       {"emoji": "🕊️",  "name": "Pardon Token",         "desc": "If you receive the most votes today you are spared. Second highest is eliminated instead."},
     "broadcast":    {"emoji": "📣",  "name": "Broadcast Token",      "desc": "Send one anonymous message to all of village-chat. No name attached."},
     "gamble":       {"emoji": "🎰",  "name": "Gamble Token",         "desc": "Flip a coin. Heads: you learn one wolf's name. Tails: one wolf learns your role."},
-    "grave":        {"emoji": "⚰️",  "name": "Grave Token",          "desc": "If you are eliminated, you get one final anonymous message posted to village-chat."},
     "mirror":       {"emoji": "🪞",  "name": "Mirror Token",         "desc": "If you are wolf-killed tonight, the kill bounces back and eliminates the wolf who chose you."},
-    "wild":         {"emoji": "🃏",  "name": "Wild Token",           "desc": "Mystery box — you pick any token from the full list. You don't know what you're getting until you open it."},
+    "wild":         {"emoji": "🃏",  "name": "Wild Token",           "desc": "Mystery box — you pick any token from the full list after opening it."},
 }
 
 # Challenge prompts by category
@@ -9235,6 +9998,167 @@ def db_clear_tokens(guild_id):
     c.execute("UPDATE challenges SET is_open=0 WHERE guild_id=?", (guild_id,))
     conn.commit()
     conn.close()
+
+# ── Reputation helpers ────────────────────────────────────────────────────
+def db_add_reputation_vote(guild_id, voter_id, target_id, category, game_num):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO reputation VALUES (?,?,?,?,?)",
+              (guild_id, voter_id, target_id, category, game_num))
+    c.execute(f"INSERT INTO reputation_totals (guild_id, player_id, best_liar, most_helpful) "
+              f"VALUES (?,?,0,0) ON CONFLICT(guild_id,player_id) DO NOTHING",
+              (guild_id, target_id))
+    if category == "best_liar":
+        c.execute("UPDATE reputation_totals SET best_liar=best_liar+1 WHERE guild_id=? AND player_id=?",
+                  (guild_id, target_id))
+    else:
+        c.execute("UPDATE reputation_totals SET most_helpful=most_helpful+1 WHERE guild_id=? AND player_id=?",
+                  (guild_id, target_id))
+    conn.commit()
+    conn.close()
+
+def db_get_reputation(guild_id, player_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT best_liar, most_helpful FROM reputation_totals WHERE guild_id=? AND player_id=?",
+              (guild_id, player_id))
+    row = c.fetchone()
+    conn.close()
+    return row or (0, 0)
+
+def db_get_reputation_leaderboard(guild_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT player_id, best_liar, most_helpful FROM reputation_totals "
+              "WHERE guild_id=? ORDER BY best_liar+most_helpful DESC LIMIT 20", (guild_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def db_already_voted_reputation(guild_id, voter_id, game_num, category):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM reputation WHERE guild_id=? AND voter_id=? AND game_num=? AND category=?",
+              (guild_id, voter_id, game_num, category))
+    count = c.fetchone()[0]
+    conn.close()
+    return count > 0
+
+# ── Prophecy helpers ──────────────────────────────────────────────────────
+def db_submit_prophecy(guild_id, player_id, wolf_guess_id, first_death_id, winner):
+    import time as _tp
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO prophecies VALUES (?,?,?,?,?,?)",
+              (guild_id, player_id, wolf_guess_id, first_death_id, winner, int(_tp.time())))
+    conn.commit()
+    conn.close()
+
+def db_get_prophecies(guild_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT player_id, wolf_guess, first_death, winner FROM prophecies WHERE guild_id=?",
+              (guild_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def db_clear_prophecies(guild_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("DELETE FROM prophecies WHERE guild_id=?", (guild_id,))
+    conn.commit()
+    conn.close()
+
+# ── Bounty helpers ────────────────────────────────────────────────────────
+def db_set_bounty(guild_id, player_id, bounty_type, target_id=0, target_role=""):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO bounties VALUES (?,?,?,?,?,?)",
+              (guild_id, player_id, bounty_type, target_id, target_role, 0))
+    conn.commit()
+    conn.close()
+
+def db_get_bounties(guild_id, player_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT bounty_type, target_id, target_role, completed FROM bounties WHERE guild_id=? AND player_id=?",
+              (guild_id, player_id))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def db_complete_bounty(guild_id, player_id, bounty_type):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("UPDATE bounties SET completed=1 WHERE guild_id=? AND player_id=? AND bounty_type=?",
+              (guild_id, player_id, bounty_type))
+    conn.commit()
+    conn.close()
+
+def db_clear_bounties(guild_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("DELETE FROM bounties WHERE guild_id=?", (guild_id,))
+    conn.commit()
+    conn.close()
+
+# ── Spectator prediction helpers ──────────────────────────────────────────
+def db_get_spectator_points(guild_id, player_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT points FROM spectator_points WHERE guild_id=? AND player_id=?",
+              (guild_id, player_id))
+    row = c.fetchone()
+    if not row:
+        c.execute("INSERT INTO spectator_points VALUES (?,?,?)", (guild_id, player_id, 100))
+        conn.commit()
+        row = (100,)
+    conn.close()
+    return row[0]
+
+def db_add_spectator_points(guild_id, player_id, amount):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("INSERT INTO spectator_points VALUES (?,?,?) ON CONFLICT(guild_id,player_id) "
+              "DO UPDATE SET points=points+?", (guild_id, player_id, 100, amount))
+    conn.commit()
+    conn.close()
+
+def db_submit_spectator_prediction(guild_id, player_id, pred_type, prediction, points_bet):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO spectator_predictions VALUES (?,?,?,?,?,?)",
+              (guild_id, player_id, pred_type, prediction, points_bet, 0))
+    conn.commit()
+    conn.close()
+
+def db_get_spectator_predictions(guild_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT player_id, pred_type, prediction, points_bet, correct FROM spectator_predictions WHERE guild_id=?",
+              (guild_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def db_get_spectator_leaderboard(guild_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT player_id, points FROM spectator_points WHERE guild_id=? ORDER BY points DESC LIMIT 15",
+              (guild_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def db_get_game_count(guild_id):
+    """Return the total number of games recorded for this guild."""
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT COUNT(DISTINCT game_num) FROM player_stats WHERE guild_id=?", (guild_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else 0
 
 
 def get_disney_role(role_name: str) -> tuple:
@@ -10283,6 +11207,28 @@ class ConfirmStartView(View):
                         "👥 **Chaos Game — Player Count Hidden**\n"
                         "*You know your role. You do not know how many are playing.*\n"
                         "*The size of the village is yours to discover.*")
+
+        # ── Assign bounties and quests to all players ─────────────────────
+        safe_task(_assign_bounties(interaction.guild, interaction.guild_id), "assign_bounties")
+
+        # ── Open prophecy window — closes at end of Night 1 ───────────────
+        state2 = cached_get_state(interaction.guild_id) or {}
+        vc_ch2 = interaction.guild.get_channel(state2.get("village_chat_ch_id") or 0)
+        if vc_ch2:
+            proph_embed = discord.Embed(
+                title       = "🔮 Prophecy Board — Submit Your Predictions!",
+                description = (
+                    "Before the first night ends, submit your predictions:\n\n"
+                    "🐺 **Who is a wolf?**\n"
+                    "💀 **Who will die first?**\n"
+                    "🏆 **Who will win?**\n\n"
+                    "Use `/prophecy` to submit anonymously.\n"
+                    "*If your predictions come true, you earn a bonus token!*\n"
+                    "*Submissions close at the end of Night 1.*"
+                ),
+                color = 0x2C3060
+            )
+            await vc_ch2.send(embed=proph_embed)
 
         # ── Post and pin the mod dashboard ───────────────────────────────
         invalidate_cache(interaction.guild_id)
@@ -14552,6 +15498,61 @@ async def assign_victors(interaction: discord.Interaction, winning_team: str):
         # ── Full Game Summary — Night actions and day votes ──────────────
         await _post_game_summary(reveal_ch, interaction.guild, guild_id, pid_to_name)
 
+        # ── Check bounties & quests ───────────────────────────────────────
+        bounty_winners = await _check_bounty_completion(interaction.guild, guild_id)
+
+        # ── Resolve prophecies ────────────────────────────────────────────
+        proph_results = await _resolve_prophecies(interaction.guild, guild_id, winning_team)
+        if proph_results and reveal_ch:
+            proph_lines = []
+            for player_id, correct_list in proph_results:
+                m  = interaction.guild.get_member(player_id)
+                nm = m.display_name if m else str(player_id)
+                proph_lines.append(f"🔮 **{nm}** — " + " | ".join(correct_list))
+            if proph_lines:
+                proph_embed = discord.Embed(
+                    title       = "🔮 Prophecy Results",
+                    description = "\n".join(proph_lines) + "\n\n*Correct prophets have earned a 🃏 Wild Token!*",
+                    color       = 0x2C3060
+                )
+                await reveal_ch.send(embed=proph_embed)
+
+        # ── Resolve spectator predictions ─────────────────────────────────
+        spec_results = await _resolve_spectator_predictions(interaction.guild, guild_id, winning_team)
+        state_sv = cached_get_state(guild_id) or {}
+        spec_ch  = interaction.guild.get_channel(state_sv.get("spectator_ch_id") or 0)
+        if spec_results and spec_ch:
+            spec_lines = []
+            for pid, (correct, delta) in spec_results.items():
+                m  = interaction.guild.get_member(pid)
+                nm = m.display_name if m else str(pid)
+                icon = "✅" if correct else "❌"
+                spec_lines.append(f"{icon} **{nm}** — {'won' if correct else 'lost'} {abs(delta)} points")
+            if spec_lines:
+                spec_embed = discord.Embed(
+                    title       = "🎲 Spectator Predictions Results",
+                    description = "\n".join(spec_lines),
+                    color       = 0x2C3060
+                )
+                await spec_ch.send(embed=spec_embed)
+
+        # ── Open rating window ────────────────────────────────────────────
+        if reveal_ch:
+            rate_embed = discord.Embed(
+                title       = "⭐ Rate Your Fellow Players!",
+                description = (
+                    "The game is over! Use `/rate_players` to vote:\n\n"
+                    "🤥 **Best Liar** — who fooled you the most?\n"
+                    "🤝 **Most Helpful** — who helped the village the most?\n\n"
+                    "*Votes are tracked across all games and shown on the reputation leaderboard.*"
+                ),
+                color = 0xF39C12
+            )
+            await reveal_ch.send(embed=rate_embed)
+
+        # ── Clean up ──────────────────────────────────────────────────────
+        db_clear_bounties(guild_id)
+
     reveal_note = f"Role reveal posted to {reveal_ch.mention}." if reveal_ch else "⚠️ No channel found for role reveal."
     await interaction.followup.send(
         f"✅ Stats recorded. **{winning_team.capitalize()}** team wins credited to {len(winner_pids)} players.\n"
@@ -18633,6 +19634,60 @@ async def resolve_night(guild: discord.Guild, night_num: int):
 
     db_set_state(guild_id, phase="day")
     db_clear_cupid_current(guild_id)
+
+    # ── Shadow Token — deliver report to owner ───────────────────────────
+    try:
+        state_rn       = db_get_state(guild_id) or {}
+        shadow_target  = state_rn.get("shadow_token_target")
+        shadow_owner   = state_rn.get("shadow_token_owner")
+        if shadow_target and shadow_owner:
+            actions_all = db_get_night_actions(guild_id, night_num)
+            rows_rn     = db_get_assignments(guild_id)
+
+            def sname(pid):
+                m = guild.get_member(pid)
+                return m.display_name if m else str(pid)
+
+            target_role = next((r[1] for r in rows_rn if r[0] == shadow_target), "?")
+            report_lines = [f"🕵️ **Shadow Report — Night {night_num}**",
+                            f"You followed: **{sname(shadow_target)}** ({target_role})\n"]
+
+            # Actions BY the target
+            by_target = [(at, tid) for aid, at, tid in actions_all if aid == shadow_target]
+            if by_target:
+                report_lines.append("**Actions they took:**")
+                for at, tid in by_target:
+                    report_lines.append(f"  → {at} on **{sname(tid) if tid else '—'}**")
+            else:
+                report_lines.append("**Actions they took:** *None recorded.*")
+
+            # Actions AGAINST the target
+            against_target = [(aid, at) for aid, at, tid in actions_all if tid == shadow_target]
+            if against_target:
+                report_lines.append("\n**Actions taken against them:**")
+                for aid, at in against_target:
+                    report_lines.append(f"  → **{sname(aid)}** used {at} on them")
+            else:
+                report_lines.append("\n**Actions taken against them:** *None.*")
+
+            # Deliver to owner's private channel
+            owner_row = next((r for r in rows_rn if r[0] == shadow_owner), None)
+            owner_ch  = guild.get_channel(owner_row[3]) if owner_row and len(owner_row) > 3 else None
+            if owner_ch:
+                embed = discord.Embed(
+                    title       = "🕵️ Shadow Report",
+                    description = "\n".join(report_lines),
+                    color       = 0x2C3060
+                )
+                owner_m = guild.get_member(shadow_owner)
+                await owner_ch.send(
+                    f"{owner_m.mention if owner_m else ''} Your shadow report is ready:",
+                    embed=embed)
+
+            # Clear shadow token state
+            db_set_state(guild_id, **{"shadow_token_target": None, "shadow_token_owner": None})
+    except Exception as e:
+        print(f"[resolve_night] shadow token report failed: {e}")
 
     # Pull submitted actions summary for mod reference
     actions  = db_get_night_actions(guild_id, night_num)
