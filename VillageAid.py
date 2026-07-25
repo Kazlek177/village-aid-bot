@@ -5515,9 +5515,13 @@ async def _post_rumor_mill(guild, guild_id: int, night_num: int):
 async def _assign_bounties(guild, guild_id: int):
     """Assign secret bounties to all players at game start."""
     import random as _rand
+    import asyncio as _abio
+    # Wait briefly so private channels are fully created and cached
+    await _abio.sleep(3)
+
     rows  = db_get_assignments(guild_id)
     alive = [r for r in rows if r[2] == 1]
-    wolves   = [r for r in alive if get_team(guild_id, r[1]) == "wolf"]
+    wolves    = [r for r in alive if get_team(guild_id, r[1]) == "wolf"]
     villagers = [r for r in alive if get_team(guild_id, r[1]) == "village"]
     wolf_roles = list({r[1] for r in wolves})
 
@@ -5525,13 +5529,16 @@ async def _assign_bounties(guild, guild_id: int):
 
     for r in wolves:
         pid = r[0]
-        # Wolf bounty: kill a specific wolf role
         if wolf_roles:
             target_role = _rand.choice(wolf_roles)
             db_set_bounty(guild_id, pid, "wolf_kill_role", target_role=target_role)
 
-        # Send to private channel
-        priv_ch = guild.get_channel(r[3]) if len(r) > 3 else None
+        priv_ch = guild.get_channel(r[3]) if len(r) > 3 and r[3] else None
+        if not priv_ch:
+            try:
+                priv_ch = await guild.fetch_channel(r[3]) if len(r) > 3 and r[3] else None
+            except Exception:
+                pass
         if priv_ch:
             m = guild.get_member(pid)
             embed = discord.Embed(
@@ -5545,18 +5552,16 @@ async def _assign_bounties(guild, guild_id: int):
             )
             try:
                 await priv_ch.send(embed=embed)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[bounty] wolf send failed for {pid}: {e}")
 
     for r in villagers:
-        pid   = r[0]
+        pid    = r[0]
         quests = []
 
-        # Quest 1: Never change your vote all game
         db_set_bounty(guild_id, pid, "never_change_vote")
         quests.append("**Quest 1:** Never change your vote all game.")
 
-        # Quest 2: Keep a specific player alive to Day 3
         others = [v for v in villagers if v[0] != pid]
         if others:
             target_row = _rand.choice(others)
@@ -5565,7 +5570,12 @@ async def _assign_bounties(guild, guild_id: int):
             db_set_bounty(guild_id, pid, "keep_alive_day3", target_id=target_row[0])
             quests.append(f"**Quest 2:** Keep **{target_nm}** alive until Day 3.")
 
-        priv_ch = guild.get_channel(r[3]) if len(r) > 3 else None
+        priv_ch = guild.get_channel(r[3]) if len(r) > 3 and r[3] else None
+        if not priv_ch:
+            try:
+                priv_ch = await guild.fetch_channel(r[3]) if len(r) > 3 and r[3] else None
+            except Exception:
+                pass
         if priv_ch:
             embed = discord.Embed(
                 title       = "🎯 Your Quests",
@@ -5578,8 +5588,8 @@ async def _assign_bounties(guild, guild_id: int):
             )
             try:
                 await priv_ch.send(embed=embed)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[bounty] villager send failed for {pid}: {e}")
 
 
 async def _check_bounty_completion(guild, guild_id: int):
@@ -7319,6 +7329,572 @@ async def remove_npc(interaction: discord.Interaction, name: str):
 
 
 # ── Minimal role card for NPC (no @mention) ───────────────────────────────
+# ====================== DISNEY THEME ======================
+
+DISNEY_ROLE_MAP = {
+    # Villains (Wolves)
+    "Wolf":         ("Villain Henchman",    "wolf"),
+    "Alpha":        ("Maleficent",          "wolf"),
+    "Elite Alpha":  ("Ursula",              "wolf"),
+    "Blessed Wolf": ("Gaston",              "wolf"),
+    "Bloodhound":   ("Scar's Spy",          "wolf"),
+    "Bloodletter":  ("Dr. Facilier",        "wolf"),
+    "Crazed Wolf":  ("Yzma",               "wolf"),
+    "Dire Wolf":    ("Hades",              "wolf"),
+    "Echo-Stalker": ("Jafar's Parrot",     "wolf"),
+    "Shadow Wolf":  ("Captain Barbossa",   "wolf"),
+    "Werekitten":   ("Cheshire Cat",       "wolf"),
+    "Wolf Pup":     ("LeFou",              "wolf"),
+    # Heroes (Village)
+    "Villager":        ("Townsperson",        "village"),
+    "Seer":            ("Merlin",             "village"),
+    "Doctor":          ("Fairy Godmother",    "village"),
+    "Surgeon":         ("Doc",               "village"),
+    "Huntsman":        ("Flynn Rider",        "village"),
+    "Sheriff":         ("Cogsworth",          "village"),
+    "Medium":          ("Grandmother Willow", "village"),
+    "Mayor":           ("King Triton",        "village"),
+    "Governor":        ("The Sultan",         "village"),
+    "Elder":           ("Genie",              "village"),
+    "Insomniac":       ("Jiminy Cricket",     "village"),
+    "Agitator":        ("Tinker Bell",        "village"),
+    "Hermit":          ("Quasimodo",          "village"),
+    "Cupid":           ("Cinderella's Fairy", "village"),
+    "Gravedigger":     ("Pain & Panic",       "village"),
+    "Clone":           ("Magic Mirror",       "village"),
+    "Shapeshifter":    ("Merida",             "village"),
+    "Drunk":           ("Flounder",           "village"),
+    "Pothead":         ("Baloo",              "village"),
+    "Flirt":      ("Megara",             "village"),
+    "Jafar":           ("Pascal",             "village"),
+    "Lycan":           ("The Beast",          "village"),
+    "Time Lord":       ("Mad Hatter",         "village"),
+    "Village Idiot":   ("Dopey",              "village"),
+    "Village Jokester":("Genie (Comedy)",     "village"),
+    "Virgin":          ("Sleeping Beauty",    "village"),
+    "Traitor":         ("Pinocchio",          "village"),
+    "White Wolf":      ("Elsa",              "village"),
+    # Enchanted (Neutral)
+    "Witch":           ("Madam Mim",          "neutral"),
+    "Oracle":          ("Blue Fairy",         "neutral"),
+    "Warlock":         ("Yen Sid",            "neutral"),
+    "Fairy Elf":       ("Tinker Bell",        "neutral"),
+    "Wraith":          ("Headless Horseman",  "neutral"),
+    "Diseased":        ("Tarzan",             "village"),
+    "Flirt":           ("Megara",             "village"),
+}
+
+# Disney channel name overrides
+DISNEY_CHANNEL_NAMES = {
+    "mod-log":      "royal-council",
+    "player-list":  "kingdom-roster",
+    "role-list":    "enchanted-roles",
+    "night-order":  "spell-order",
+    "day-vote":     "royal-vote",
+    "timeline":     "kingdom-chronicle",
+    "stats":        "hall-of-fame",
+    "blood-board":  "royal-decree",
+    "wolf-den":     "villain-lair",
+    "ghost-chat":   "spirit-realm",
+    "wraith-den":   "shadow-realm",
+    "win-tracker":  "kingdom-balance",
+    "village-chat": "enchanted-village",
+    "spectator-qa": "royal-observer",
+}
+
+# Disney team names
+DISNEY_TEAMS = {
+    "wolf":    "Villains",
+    "village": "Heroes",
+    "neutral": "Enchanted",
+}
+
+ROLE_IMAGES = {
+    "Agitator":         "https://i.imgur.com/WTdGM0h.png",
+    "Alpha":            "https://i.imgur.com/fDCluc3.png",
+    "Blessed Wolf":     "https://i.imgur.com/HFdD0w9.png",
+    "Bloodhound":       "https://i.imgur.com/d8REQKM.png",
+    "Bloodletter":      "https://i.imgur.com/Csrp3hI.png",
+    "Clone":            "https://i.imgur.com/QHeWGh1.png",
+    "Crazed Wolf":      "https://i.imgur.com/tg6eu75.png",
+    "Cupid":            "https://i.imgur.com/IVg7j1t.png",
+    "Dire Wolf":        "https://i.imgur.com/BKG7tAx.png",
+    "Diseased":         "https://i.imgur.com/VH99SAi.png",
+    "Doctor":           "https://i.imgur.com/DNcUh6b.png",
+    "Drunk":            "https://i.imgur.com/P4MDFRX.png",
+    "Echo-Stalker":     "https://i.imgur.com/5Icfzzx.png",
+    "Elder":            "https://i.imgur.com/qNnEnfp.png",
+    "Elite Alpha":      "https://i.imgur.com/rvUCJRr.png",
+    "Fairy Elf":        "https://i.imgur.com/jtGKdD7.png",
+    "Flirt":            "https://i.imgur.com/q9qKzPY.png",
+    "Governor":         "https://i.imgur.com/R6uacXw.png",
+    "Gravedigger":      "https://i.imgur.com/MkaGni5.png",
+    "Hermit":           "https://i.imgur.com/HXgEkEz.png",
+    "Huntsman":         "https://i.imgur.com/zukx3nS.png",
+    "Insomniac":        "https://i.imgur.com/6mW1Crf.png",
+    "Jafar":            "https://i.imgur.com/T7M56qK.png",
+    "Lycan":            "https://i.imgur.com/GKNXTtM.png",
+    "Mayor":            "https://i.imgur.com/S0FvJ3S.png",
+    "Medium":           "https://i.imgur.com/MVpgpKm.png",
+    "Oracle":           "https://i.imgur.com/bzUvKAu.png",
+    "Pothead":          "https://i.imgur.com/I50dfxk.png",
+    "Seer":             "https://i.imgur.com/Ax8l1Tg.png",
+    "Shadow Wolf":      "https://i.imgur.com/NGWivEg.png",
+    "Shapeshifter":     "https://i.imgur.com/jqW38pz.png",
+    "Sheriff":          "https://i.imgur.com/UjX3Oh8.png",
+    "Surgeon":          "https://i.imgur.com/mcXV7CU.png",
+    "Time Lord":        "https://i.imgur.com/kuxshls.png",
+    "Traitor":          "https://i.imgur.com/SQ6WCE2.png",
+    "Village Idiot":    "https://i.imgur.com/tuUZT2A.png",
+    "Village Jokester": "https://i.imgur.com/V44VFu3.png",
+    "Villager":         "https://i.imgur.com/bbV9lEb.png",
+    "Virgin":           "https://i.imgur.com/etbKCqi.png",
+    "Warlock":          "https://i.imgur.com/msyxKhc.png",
+    "Werekitten":       "https://i.imgur.com/dN2s6p8.png",
+    "White Wolf":       "https://i.imgur.com/rp8NsaH.png",
+    "Witch":            "https://i.imgur.com/QhFp0S9.png",
+    "Wolf":             "https://i.imgur.com/HDfxSru.png",
+    "Wolf Pup":         "https://i.imgur.com/CE1DXN2.png",
+    "Wraith":           "https://i.imgur.com/8xqY8hp.png",
+}
+
+# ====================== CHALLENGE & TOKEN SYSTEM ======================
+
+# All available token types with descriptions and effects
+TOKENS = {
+    "guardian":     {"emoji": "🛡️",  "name": "Guardian Token",      "desc": "One-time protection from a wolf kill. Fires automatically the night you would have died."},
+    "peek":         {"emoji": "🔍",  "name": "Peek Token",           "desc": "Ask the bot one yes/no question: Is [player] on the wolf team? Answer sent privately."},
+    "double_vote":  {"emoji": "🎯",  "name": "Double Vote Token",    "desc": "Your vote counts twice for one day. Declare it when casting your vote."},
+    "skip_night":   {"emoji": "🌙",  "name": "Skip Night Token",     "desc": "Wolves cannot target you tonight. Declare before night ends."},
+    "save":         {"emoji": "💊",  "name": "Save Token",           "desc": "Protect any player of your choosing from the next wolf kill."},
+    "silence":      {"emoji": "🤫",  "name": "Silence Token",        "desc": "Force one player to abstain from the next day vote. Mod executes it."},
+    "reveal":       {"emoji": "🎭",  "name": "Reveal Token",         "desc": "Force one player to publicly confirm whether they are village or wolf-aligned."},
+    "swap":         {"emoji": "🌀",  "name": "Swap Token",           "desc": "All roles in the game are randomly reshuffled among alive players. Everyone wakes up as someone new. Complete chaos."},
+    "decoy":        {"emoji": "🎪",  "name": "Decoy Token",          "desc": "For one night you secretly choose the wolf kill target instead of the den. The den believes they chose normally."},
+    "shadow":       {"emoji": "🕵️",  "name": "Shadow Token",         "desc": "Follow one player for one night. You learn every action taken against them and by them. Full report delivered at dawn."},
+    "pardon":       {"emoji": "🕊️",  "name": "Pardon Token",         "desc": "If you receive the most votes today you are spared. Second highest is eliminated instead."},
+    "broadcast":    {"emoji": "📣",  "name": "Broadcast Token",      "desc": "Send one anonymous message to all of village-chat. No name attached."},
+    "gamble":       {"emoji": "🎰",  "name": "Gamble Token",         "desc": "Flip a coin. Heads: you learn one wolf's name. Tails: one wolf learns your role."},
+    "mirror":       {"emoji": "🪞",  "name": "Mirror Token",         "desc": "If you are wolf-killed tonight, the kill bounces back and eliminates the wolf who chose you."},
+    "wild":         {"emoji": "🃏",  "name": "Wild Token",           "desc": "Mystery box — you pick any token from the full list after opening it."},
+}
+
+# Challenge prompts by category
+CHALLENGE_PROMPTS = {
+    "dad_joke":    "🧀 **Dad Joke Challenge** — Tell us your best (worst) dad joke. The groan-worthiest wins!",
+    "pickup_line": "😏 **Pick-Up Line Challenge** — Drop your best (or worst) pick-up line. Most creative wins!",
+    "alibi":       "🕵️ **Suspicious Alibi Challenge** — Give the most suspicious-sounding innocent alibi you can.",
+    "whisperfall": "🌙 **Whisperfall Challenge** — Complete this sentence: *'The wolves are definitely not...'*",
+    "roast":       "🔥 **Roast Challenge** — Roast the mod in one sentence. Funniest wins!",
+    "haiku":       "🌸 **Haiku Challenge** — Write a haiku about Whisperfall. 5-7-5 syllables.",
+    "confession":  "😇 **Confession Challenge** — Confess the most suspicious thing you've ever done in a Mafia game.",
+    "prophecy":    "🔮 **Prophecy Challenge** — Predict who will be the first to die tonight. Most creative prediction wins!",
+    "custom":      "✏️ **Custom Challenge**",
+}
+
+
+def db_open_challenge(guild_id, prompt):
+    import time as _t
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT COALESCE(MAX(challenge_id),0)+1 FROM challenges WHERE guild_id=?", (guild_id,))
+    cid = c.fetchone()[0]
+    c.execute("INSERT INTO challenges VALUES (?,?,?,?,?)",
+              (guild_id, cid, prompt, 1, int(_t.time())))
+    conn.commit()
+    conn.close()
+    return cid
+
+def db_close_challenge(guild_id, challenge_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("UPDATE challenges SET is_open=0 WHERE guild_id=? AND challenge_id=?",
+              (guild_id, challenge_id))
+    conn.commit()
+    conn.close()
+
+def db_get_active_challenge(guild_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT challenge_id, prompt FROM challenges WHERE guild_id=? AND is_open=1 ORDER BY challenge_id DESC LIMIT 1",
+              (guild_id,))
+    row = c.fetchone()
+    conn.close()
+    return row
+
+def db_submit_challenge(guild_id, challenge_id, player_id, answer):
+    import time as _t
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO challenge_submissions VALUES (?,?,?,?,?)",
+              (guild_id, challenge_id, player_id, answer, int(_t.time())))
+    conn.commit()
+    conn.close()
+
+def db_get_submissions(guild_id, challenge_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT player_id, answer FROM challenge_submissions WHERE guild_id=? AND challenge_id=?",
+              (guild_id, challenge_id))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def db_award_token(guild_id, player_id, token_type):
+    import time as _t
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO player_tokens VALUES (?,?,?,?,?,?)",
+              (guild_id, player_id, token_type, 0, int(_t.time()), 0))
+    conn.commit()
+    conn.close()
+
+def db_get_player_tokens(guild_id, player_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT token_type, used FROM player_tokens WHERE guild_id=? AND player_id=?",
+              (guild_id, player_id))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def db_use_token(guild_id, player_id, token_type):
+    import time as _t
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("UPDATE player_tokens SET used=1, used_at=? WHERE guild_id=? AND player_id=? AND token_type=? AND used=0",
+              (int(_t.time()), guild_id, player_id, token_type))
+    affected = c.rowcount
+    conn.commit()
+    conn.close()
+    return affected > 0  # Returns True if token was successfully used
+
+def db_has_token(guild_id, player_id, token_type):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM player_tokens WHERE guild_id=? AND player_id=? AND token_type=? AND used=0",
+              (guild_id, player_id, token_type))
+    count = c.fetchone()[0]
+    conn.close()
+    return count > 0
+
+def db_clear_tokens(guild_id):
+    """Clear all tokens at game end."""
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("DELETE FROM player_tokens WHERE guild_id=?", (guild_id,))
+    c.execute("UPDATE challenges SET is_open=0 WHERE guild_id=?", (guild_id,))
+    conn.commit()
+    conn.close()
+
+# ── Reputation helpers ────────────────────────────────────────────────────
+def db_add_reputation_vote(guild_id, voter_id, target_id, category, game_num):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO reputation VALUES (?,?,?,?,?)",
+              (guild_id, voter_id, target_id, category, game_num))
+    c.execute(f"INSERT INTO reputation_totals (guild_id, player_id, best_liar, most_helpful) "
+              f"VALUES (?,?,0,0) ON CONFLICT(guild_id,player_id) DO NOTHING",
+              (guild_id, target_id))
+    if category == "best_liar":
+        c.execute("UPDATE reputation_totals SET best_liar=best_liar+1 WHERE guild_id=? AND player_id=?",
+                  (guild_id, target_id))
+    else:
+        c.execute("UPDATE reputation_totals SET most_helpful=most_helpful+1 WHERE guild_id=? AND player_id=?",
+                  (guild_id, target_id))
+    conn.commit()
+    conn.close()
+
+def db_get_reputation(guild_id, player_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT best_liar, most_helpful FROM reputation_totals WHERE guild_id=? AND player_id=?",
+              (guild_id, player_id))
+    row = c.fetchone()
+    conn.close()
+    return row or (0, 0)
+
+def db_get_reputation_leaderboard(guild_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT player_id, best_liar, most_helpful FROM reputation_totals "
+              "WHERE guild_id=? ORDER BY best_liar+most_helpful DESC LIMIT 20", (guild_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def db_already_voted_reputation(guild_id, voter_id, game_num, category):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM reputation WHERE guild_id=? AND voter_id=? AND game_num=? AND category=?",
+              (guild_id, voter_id, game_num, category))
+    count = c.fetchone()[0]
+    conn.close()
+    return count > 0
+
+# ── Prophecy helpers ──────────────────────────────────────────────────────
+def db_submit_prophecy(guild_id, player_id, wolf_guess_id, first_death_id, winner):
+    import time as _tp
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO prophecies VALUES (?,?,?,?,?,?)",
+              (guild_id, player_id, wolf_guess_id, first_death_id, winner, int(_tp.time())))
+    conn.commit()
+    conn.close()
+
+def db_get_prophecies(guild_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT player_id, wolf_guess, first_death, winner FROM prophecies WHERE guild_id=?",
+              (guild_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def db_clear_prophecies(guild_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("DELETE FROM prophecies WHERE guild_id=?", (guild_id,))
+    conn.commit()
+    conn.close()
+
+# ── Bounty helpers ────────────────────────────────────────────────────────
+def db_set_bounty(guild_id, player_id, bounty_type, target_id=0, target_role=""):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO bounties VALUES (?,?,?,?,?,?)",
+              (guild_id, player_id, bounty_type, target_id, target_role, 0))
+    conn.commit()
+    conn.close()
+
+def db_get_bounties(guild_id, player_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT bounty_type, target_id, target_role, completed FROM bounties WHERE guild_id=? AND player_id=?",
+              (guild_id, player_id))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def db_complete_bounty(guild_id, player_id, bounty_type):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("UPDATE bounties SET completed=1 WHERE guild_id=? AND player_id=? AND bounty_type=?",
+              (guild_id, player_id, bounty_type))
+    conn.commit()
+    conn.close()
+
+def db_clear_bounties(guild_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("DELETE FROM bounties WHERE guild_id=?", (guild_id,))
+    conn.commit()
+    conn.close()
+
+# ── Spectator prediction helpers ──────────────────────────────────────────
+def db_get_spectator_points(guild_id, player_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT points FROM spectator_points WHERE guild_id=? AND player_id=?",
+              (guild_id, player_id))
+    row = c.fetchone()
+    if not row:
+        c.execute("INSERT INTO spectator_points VALUES (?,?,?)", (guild_id, player_id, 100))
+        conn.commit()
+        row = (100,)
+    conn.close()
+    return row[0]
+
+def db_add_spectator_points(guild_id, player_id, amount):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("INSERT INTO spectator_points VALUES (?,?,?) ON CONFLICT(guild_id,player_id) "
+              "DO UPDATE SET points=points+?", (guild_id, player_id, 100, amount))
+    conn.commit()
+    conn.close()
+
+def db_submit_spectator_prediction(guild_id, player_id, pred_type, prediction, points_bet):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("INSERT OR REPLACE INTO spectator_predictions VALUES (?,?,?,?,?,?)",
+              (guild_id, player_id, pred_type, prediction, points_bet, 0))
+    conn.commit()
+    conn.close()
+
+def db_get_spectator_predictions(guild_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT player_id, pred_type, prediction, points_bet, correct FROM spectator_predictions WHERE guild_id=?",
+              (guild_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def db_get_spectator_leaderboard(guild_id):
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT player_id, points FROM spectator_points WHERE guild_id=? ORDER BY points DESC LIMIT 15",
+              (guild_id,))
+    rows = c.fetchall()
+    conn.close()
+    return rows
+
+def db_get_game_count(guild_id):
+    """Return the total number of games recorded for this guild."""
+    conn = sqlite3.connect(DB_FILE)
+    c    = conn.cursor()
+    c.execute("SELECT COUNT(DISTINCT game_num) FROM player_stats WHERE guild_id=?", (guild_id,))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else 0
+
+
+def get_disney_role(role_name: str) -> tuple:
+    """Return (disney_name, team) for a role, or original name if not mapped."""
+    return DISNEY_ROLE_MAP.get(role_name, (role_name, None))
+
+def get_disney_channel_name(base_name: str, font: str, emoji: str = "") -> str:
+    """Return Disney-themed channel name if disney mode, else standard ch_name."""
+    disney_name = DISNEY_CHANNEL_NAMES.get(base_name, base_name)
+    styled = apply_font(disney_name, font)
+    base   = f"{emoji}{styled}" if emoji else styled
+    return base.replace(" ", "-")
+
+def get_theme_labels(guild_id: int) -> dict:
+    """Return theme-appropriate labels for teams and setting name."""
+    state   = cached_get_state(guild_id) or {}
+    disney  = bool(state.get("disney_mode", 0))
+    hp      = bool(state.get("hp_mode", 0))
+    if disney:
+        return {
+            "village":      "Heroes",
+            "wolf":         "Villains",
+            "neutral":      "Enchanted",
+            "setting":      "the Enchanted Kingdom",
+            "village_icon": "🏰",
+            "wolf_icon":    "⚔️",
+            "neutral_icon": "✨",
+            "den_name":     "Villain Lair",
+        }
+    elif hp:
+        return {
+            "village":      "Order of the Phoenix",
+            "wolf":         "Death Eaters",
+            "neutral":      "Unaligned",
+            "setting":      "the Wizarding World",
+            "village_icon": "⚡",
+            "wolf_icon":    "🐍",
+            "neutral_icon": "🌙",
+            "den_name":     "Chamber of Secrets",
+        }
+    else:
+        return {
+            "village":      "Village",
+            "wolf":         "Wolves",
+            "neutral":      "Neutral",
+            "setting":      "Whisperfall",
+            "village_icon": "🏘️",
+            "wolf_icon":    "🐺",
+            "neutral_icon": "⚖️",
+            "den_name":     "Wolf Den",
+        }
+
+
+def is_disney_mode(guild_id: int) -> bool:
+    """Check if this guild's current game is running in Disney theme."""
+    state = cached_get_state(guild_id) or {}
+    return bool(state.get("disney_mode", 0))
+
+
+# ====================== HARRY POTTER THEME ======================
+
+HP_ROLE_MAP = {
+    # Death Eaters (Wolves)
+    "Wolf":         ("Death Eater",        "wolf"),
+    "Alpha":        ("Grindelwald",        "wolf"),
+    "Elite Alpha":  ("Voldemort",          "wolf"),
+    "Blessed Wolf": ("Fenrir Greyback",    "wolf"),
+    "Bloodhound":   ("Nagini",             "wolf"),
+    "Bloodletter":  ("Dolores Umbridge",   "wolf"),
+    "Crazed Wolf":  ("Barty Crouch Jr.",   "wolf"),
+    "Dire Wolf":    ("Wormtail",           "wolf"),
+    "Echo-Stalker": ("Mundungus Fletcher", "wolf"),
+    "Shadow Wolf":  ("Igor Karkaroff",     "wolf"),
+    "Werekitten":   ("Bellatrix Lestrange","wolf"),
+    "Wolf Pup":     ("Draco Malfoy",       "wolf"),
+    # Order of the Phoenix (Village)
+    "Villager":          ("Hogwarts Student",      "village"),
+    "Seer":              ("Professor Trelawney",   "village"),
+    "Doctor":            ("Madam Pomfrey",         "village"),
+    "Surgeon":           ("Newt Scamander",        "village"),
+    "Huntsman":          ("Harry Potter",          "village"),
+    "Sheriff":           ("Hermione Granger",      "village"),
+    "Medium":            ("Moaning Myrtle",        "village"),
+    "Mayor":             ("Albus Dumbledore",      "village"),
+    "Governor":          ("Minister Fudge",        "village"),
+    "Elder":             ("Nicolas Flamel",        "village"),
+    "Insomniac":         ("Dobby",                 "village"),
+    "Agitator":          ("Fred Weasley",          "village"),
+    "Hermit":            ("Hagrid",                "village"),
+    "Cupid":             ("Lavender Brown",        "village"),
+    "Gravedigger":       ("Peeves",                "village"),
+    "Clone":             ("Polyjuice Potion",      "village"),
+    "Shapeshifter":      ("Nymphadora Tonks",      "village"),
+    "Drunk":             ("Seamus Finnigan",       "village"),
+    "Pothead":           ("Neville Longbottom",    "village"),
+    "Flirt":        ("Madam Rosmerta",        "village"),
+    "Jafar":             ("Professor Slughorn",    "village"),
+    "Lycan":             ("Remus Lupin",           "village"),
+    "Time Lord":         ("Hermione's Time-Turner","village"),
+    "Village Idiot":     ("Crabbe",                "village"),
+    "Village Jokester":  ("George Weasley",        "village"),
+    "Virgin":            ("Ginny Weasley",         "village"),
+    "Traitor":           ("Severus Snape",         "village"),
+    "White Wolf":        ("Sirius Black",          "village"),
+    # Unaligned (Neutral)
+    "Witch":     ("Sybill Trelawney",  "neutral"),
+    "Oracle":    ("The Sorting Hat",   "neutral"),
+    "Warlock":   ("Gilderoy Lockhart", "neutral"),
+    "Fairy Elf": ("Dobby (Free Elf)",  "neutral"),
+    "Wraith":    ("Dementors",         "neutral"),
+    "Diseased":  ("Argus Filch",       "village"),
+    "Flirt":     ("Madam Rosmerta",    "village"),
+}
+
+HP_CHANNEL_NAMES = {
+    "mod-log":      "headmaster-office",
+    "player-list":  "marauders-map",
+    "role-list":    "sorting-results",
+    "night-order":  "spell-order",
+    "day-vote":     "wizengamot",
+    "timeline":     "hogwarts-chronicle",
+    "stats":        "house-points",
+    "blood-board":  "daily-prophet",
+    "wolf-den":     "chamber-of-secrets",
+    "ghost-chat":   "nearly-headless-lounge",
+    "wraith-den":   "dementor-lair",
+    "win-tracker":  "order-balance",
+    "village-chat": "great-hall",
+    "spectator-qa": "owlery",
+}
+
+HP_TEAMS = {
+    "wolf":    "Death Eaters",
+    "village": "Order of the Phoenix",
+    "neutral": "Unaligned",
+}
+
+def get_hp_role(role_name: str) -> tuple:
+    """Return (hp_name, team) for a role, or original name if not mapped."""
+    return HP_ROLE_MAP.get(role_name, (role_name, None))
+
+def is_hp_mode(guild_id: int) -> bool:
+    """Check if this guild's current game is running in Harry Potter theme."""
+    state = cached_get_state(guild_id) or {}
+    return bool(state.get("hp_mode", 0))
+
+
+
 def build_role_card_npc(npc_name: str, role_name: str, role_info: dict, font_style: str = "default") -> discord.Embed:
     team = role_info.get("team", "village")
     if team == "wolf":
@@ -9742,572 +10318,6 @@ def build_role_card(player: discord.Member, role_name: str, role_info: dict,
     if img_url:
         embed.set_image(url=img_url)
     return embed
-
-
-# ====================== DISNEY THEME ======================
-
-DISNEY_ROLE_MAP = {
-    # Villains (Wolves)
-    "Wolf":         ("Villain Henchman",    "wolf"),
-    "Alpha":        ("Maleficent",          "wolf"),
-    "Elite Alpha":  ("Ursula",              "wolf"),
-    "Blessed Wolf": ("Gaston",              "wolf"),
-    "Bloodhound":   ("Scar's Spy",          "wolf"),
-    "Bloodletter":  ("Dr. Facilier",        "wolf"),
-    "Crazed Wolf":  ("Yzma",               "wolf"),
-    "Dire Wolf":    ("Hades",              "wolf"),
-    "Echo-Stalker": ("Jafar's Parrot",     "wolf"),
-    "Shadow Wolf":  ("Captain Barbossa",   "wolf"),
-    "Werekitten":   ("Cheshire Cat",       "wolf"),
-    "Wolf Pup":     ("LeFou",              "wolf"),
-    # Heroes (Village)
-    "Villager":        ("Townsperson",        "village"),
-    "Seer":            ("Merlin",             "village"),
-    "Doctor":          ("Fairy Godmother",    "village"),
-    "Surgeon":         ("Doc",               "village"),
-    "Huntsman":        ("Flynn Rider",        "village"),
-    "Sheriff":         ("Cogsworth",          "village"),
-    "Medium":          ("Grandmother Willow", "village"),
-    "Mayor":           ("King Triton",        "village"),
-    "Governor":        ("The Sultan",         "village"),
-    "Elder":           ("Genie",              "village"),
-    "Insomniac":       ("Jiminy Cricket",     "village"),
-    "Agitator":        ("Tinker Bell",        "village"),
-    "Hermit":          ("Quasimodo",          "village"),
-    "Cupid":           ("Cinderella's Fairy", "village"),
-    "Gravedigger":     ("Pain & Panic",       "village"),
-    "Clone":           ("Magic Mirror",       "village"),
-    "Shapeshifter":    ("Merida",             "village"),
-    "Drunk":           ("Flounder",           "village"),
-    "Pothead":         ("Baloo",              "village"),
-    "Flirt":      ("Megara",             "village"),
-    "Jafar":           ("Pascal",             "village"),
-    "Lycan":           ("The Beast",          "village"),
-    "Time Lord":       ("Mad Hatter",         "village"),
-    "Village Idiot":   ("Dopey",              "village"),
-    "Village Jokester":("Genie (Comedy)",     "village"),
-    "Virgin":          ("Sleeping Beauty",    "village"),
-    "Traitor":         ("Pinocchio",          "village"),
-    "White Wolf":      ("Elsa",              "village"),
-    # Enchanted (Neutral)
-    "Witch":           ("Madam Mim",          "neutral"),
-    "Oracle":          ("Blue Fairy",         "neutral"),
-    "Warlock":         ("Yen Sid",            "neutral"),
-    "Fairy Elf":       ("Tinker Bell",        "neutral"),
-    "Wraith":          ("Headless Horseman",  "neutral"),
-    "Diseased":        ("Tarzan",             "village"),
-    "Flirt":           ("Megara",             "village"),
-}
-
-# Disney channel name overrides
-DISNEY_CHANNEL_NAMES = {
-    "mod-log":      "royal-council",
-    "player-list":  "kingdom-roster",
-    "role-list":    "enchanted-roles",
-    "night-order":  "spell-order",
-    "day-vote":     "royal-vote",
-    "timeline":     "kingdom-chronicle",
-    "stats":        "hall-of-fame",
-    "blood-board":  "royal-decree",
-    "wolf-den":     "villain-lair",
-    "ghost-chat":   "spirit-realm",
-    "wraith-den":   "shadow-realm",
-    "win-tracker":  "kingdom-balance",
-    "village-chat": "enchanted-village",
-    "spectator-qa": "royal-observer",
-}
-
-# Disney team names
-DISNEY_TEAMS = {
-    "wolf":    "Villains",
-    "village": "Heroes",
-    "neutral": "Enchanted",
-}
-
-ROLE_IMAGES = {
-    "Agitator":         "https://i.imgur.com/WTdGM0h.png",
-    "Alpha":            "https://i.imgur.com/fDCluc3.png",
-    "Blessed Wolf":     "https://i.imgur.com/HFdD0w9.png",
-    "Bloodhound":       "https://i.imgur.com/d8REQKM.png",
-    "Bloodletter":      "https://i.imgur.com/Csrp3hI.png",
-    "Clone":            "https://i.imgur.com/QHeWGh1.png",
-    "Crazed Wolf":      "https://i.imgur.com/tg6eu75.png",
-    "Cupid":            "https://i.imgur.com/IVg7j1t.png",
-    "Dire Wolf":        "https://i.imgur.com/BKG7tAx.png",
-    "Diseased":         "https://i.imgur.com/VH99SAi.png",
-    "Doctor":           "https://i.imgur.com/DNcUh6b.png",
-    "Drunk":            "https://i.imgur.com/P4MDFRX.png",
-    "Echo-Stalker":     "https://i.imgur.com/5Icfzzx.png",
-    "Elder":            "https://i.imgur.com/qNnEnfp.png",
-    "Elite Alpha":      "https://i.imgur.com/rvUCJRr.png",
-    "Fairy Elf":        "https://i.imgur.com/jtGKdD7.png",
-    "Flirt":            "https://i.imgur.com/q9qKzPY.png",
-    "Governor":         "https://i.imgur.com/R6uacXw.png",
-    "Gravedigger":      "https://i.imgur.com/MkaGni5.png",
-    "Hermit":           "https://i.imgur.com/HXgEkEz.png",
-    "Huntsman":         "https://i.imgur.com/zukx3nS.png",
-    "Insomniac":        "https://i.imgur.com/6mW1Crf.png",
-    "Jafar":            "https://i.imgur.com/T7M56qK.png",
-    "Lycan":            "https://i.imgur.com/GKNXTtM.png",
-    "Mayor":            "https://i.imgur.com/S0FvJ3S.png",
-    "Medium":           "https://i.imgur.com/MVpgpKm.png",
-    "Oracle":           "https://i.imgur.com/bzUvKAu.png",
-    "Pothead":          "https://i.imgur.com/I50dfxk.png",
-    "Seer":             "https://i.imgur.com/Ax8l1Tg.png",
-    "Shadow Wolf":      "https://i.imgur.com/NGWivEg.png",
-    "Shapeshifter":     "https://i.imgur.com/jqW38pz.png",
-    "Sheriff":          "https://i.imgur.com/UjX3Oh8.png",
-    "Surgeon":          "https://i.imgur.com/mcXV7CU.png",
-    "Time Lord":        "https://i.imgur.com/kuxshls.png",
-    "Traitor":          "https://i.imgur.com/SQ6WCE2.png",
-    "Village Idiot":    "https://i.imgur.com/tuUZT2A.png",
-    "Village Jokester": "https://i.imgur.com/V44VFu3.png",
-    "Villager":         "https://i.imgur.com/bbV9lEb.png",
-    "Virgin":           "https://i.imgur.com/etbKCqi.png",
-    "Warlock":          "https://i.imgur.com/msyxKhc.png",
-    "Werekitten":       "https://i.imgur.com/dN2s6p8.png",
-    "White Wolf":       "https://i.imgur.com/rp8NsaH.png",
-    "Witch":            "https://i.imgur.com/QhFp0S9.png",
-    "Wolf":             "https://i.imgur.com/HDfxSru.png",
-    "Wolf Pup":         "https://i.imgur.com/CE1DXN2.png",
-    "Wraith":           "https://i.imgur.com/8xqY8hp.png",
-}
-
-# ====================== CHALLENGE & TOKEN SYSTEM ======================
-
-# All available token types with descriptions and effects
-TOKENS = {
-    "guardian":     {"emoji": "🛡️",  "name": "Guardian Token",      "desc": "One-time protection from a wolf kill. Fires automatically the night you would have died."},
-    "peek":         {"emoji": "🔍",  "name": "Peek Token",           "desc": "Ask the bot one yes/no question: Is [player] on the wolf team? Answer sent privately."},
-    "double_vote":  {"emoji": "🎯",  "name": "Double Vote Token",    "desc": "Your vote counts twice for one day. Declare it when casting your vote."},
-    "skip_night":   {"emoji": "🌙",  "name": "Skip Night Token",     "desc": "Wolves cannot target you tonight. Declare before night ends."},
-    "save":         {"emoji": "💊",  "name": "Save Token",           "desc": "Protect any player of your choosing from the next wolf kill."},
-    "silence":      {"emoji": "🤫",  "name": "Silence Token",        "desc": "Force one player to abstain from the next day vote. Mod executes it."},
-    "reveal":       {"emoji": "🎭",  "name": "Reveal Token",         "desc": "Force one player to publicly confirm whether they are village or wolf-aligned."},
-    "swap":         {"emoji": "🌀",  "name": "Swap Token",           "desc": "All roles in the game are randomly reshuffled among alive players. Everyone wakes up as someone new. Complete chaos."},
-    "decoy":        {"emoji": "🎪",  "name": "Decoy Token",          "desc": "For one night you secretly choose the wolf kill target instead of the den. The den believes they chose normally."},
-    "shadow":       {"emoji": "🕵️",  "name": "Shadow Token",         "desc": "Follow one player for one night. You learn every action taken against them and by them. Full report delivered at dawn."},
-    "pardon":       {"emoji": "🕊️",  "name": "Pardon Token",         "desc": "If you receive the most votes today you are spared. Second highest is eliminated instead."},
-    "broadcast":    {"emoji": "📣",  "name": "Broadcast Token",      "desc": "Send one anonymous message to all of village-chat. No name attached."},
-    "gamble":       {"emoji": "🎰",  "name": "Gamble Token",         "desc": "Flip a coin. Heads: you learn one wolf's name. Tails: one wolf learns your role."},
-    "mirror":       {"emoji": "🪞",  "name": "Mirror Token",         "desc": "If you are wolf-killed tonight, the kill bounces back and eliminates the wolf who chose you."},
-    "wild":         {"emoji": "🃏",  "name": "Wild Token",           "desc": "Mystery box — you pick any token from the full list after opening it."},
-}
-
-# Challenge prompts by category
-CHALLENGE_PROMPTS = {
-    "dad_joke":    "🧀 **Dad Joke Challenge** — Tell us your best (worst) dad joke. The groan-worthiest wins!",
-    "pickup_line": "😏 **Pick-Up Line Challenge** — Drop your best (or worst) pick-up line. Most creative wins!",
-    "alibi":       "🕵️ **Suspicious Alibi Challenge** — Give the most suspicious-sounding innocent alibi you can.",
-    "whisperfall": "🌙 **Whisperfall Challenge** — Complete this sentence: *'The wolves are definitely not...'*",
-    "roast":       "🔥 **Roast Challenge** — Roast the mod in one sentence. Funniest wins!",
-    "haiku":       "🌸 **Haiku Challenge** — Write a haiku about Whisperfall. 5-7-5 syllables.",
-    "confession":  "😇 **Confession Challenge** — Confess the most suspicious thing you've ever done in a Mafia game.",
-    "prophecy":    "🔮 **Prophecy Challenge** — Predict who will be the first to die tonight. Most creative prediction wins!",
-    "custom":      "✏️ **Custom Challenge**",
-}
-
-
-def db_open_challenge(guild_id, prompt):
-    import time as _t
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("SELECT COALESCE(MAX(challenge_id),0)+1 FROM challenges WHERE guild_id=?", (guild_id,))
-    cid = c.fetchone()[0]
-    c.execute("INSERT INTO challenges VALUES (?,?,?,?,?)",
-              (guild_id, cid, prompt, 1, int(_t.time())))
-    conn.commit()
-    conn.close()
-    return cid
-
-def db_close_challenge(guild_id, challenge_id):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("UPDATE challenges SET is_open=0 WHERE guild_id=? AND challenge_id=?",
-              (guild_id, challenge_id))
-    conn.commit()
-    conn.close()
-
-def db_get_active_challenge(guild_id):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("SELECT challenge_id, prompt FROM challenges WHERE guild_id=? AND is_open=1 ORDER BY challenge_id DESC LIMIT 1",
-              (guild_id,))
-    row = c.fetchone()
-    conn.close()
-    return row
-
-def db_submit_challenge(guild_id, challenge_id, player_id, answer):
-    import time as _t
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO challenge_submissions VALUES (?,?,?,?,?)",
-              (guild_id, challenge_id, player_id, answer, int(_t.time())))
-    conn.commit()
-    conn.close()
-
-def db_get_submissions(guild_id, challenge_id):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("SELECT player_id, answer FROM challenge_submissions WHERE guild_id=? AND challenge_id=?",
-              (guild_id, challenge_id))
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def db_award_token(guild_id, player_id, token_type):
-    import time as _t
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO player_tokens VALUES (?,?,?,?,?,?)",
-              (guild_id, player_id, token_type, 0, int(_t.time()), 0))
-    conn.commit()
-    conn.close()
-
-def db_get_player_tokens(guild_id, player_id):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("SELECT token_type, used FROM player_tokens WHERE guild_id=? AND player_id=?",
-              (guild_id, player_id))
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def db_use_token(guild_id, player_id, token_type):
-    import time as _t
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("UPDATE player_tokens SET used=1, used_at=? WHERE guild_id=? AND player_id=? AND token_type=? AND used=0",
-              (int(_t.time()), guild_id, player_id, token_type))
-    affected = c.rowcount
-    conn.commit()
-    conn.close()
-    return affected > 0  # Returns True if token was successfully used
-
-def db_has_token(guild_id, player_id, token_type):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM player_tokens WHERE guild_id=? AND player_id=? AND token_type=? AND used=0",
-              (guild_id, player_id, token_type))
-    count = c.fetchone()[0]
-    conn.close()
-    return count > 0
-
-def db_clear_tokens(guild_id):
-    """Clear all tokens at game end."""
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("DELETE FROM player_tokens WHERE guild_id=?", (guild_id,))
-    c.execute("UPDATE challenges SET is_open=0 WHERE guild_id=?", (guild_id,))
-    conn.commit()
-    conn.close()
-
-# ── Reputation helpers ────────────────────────────────────────────────────
-def db_add_reputation_vote(guild_id, voter_id, target_id, category, game_num):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO reputation VALUES (?,?,?,?,?)",
-              (guild_id, voter_id, target_id, category, game_num))
-    c.execute(f"INSERT INTO reputation_totals (guild_id, player_id, best_liar, most_helpful) "
-              f"VALUES (?,?,0,0) ON CONFLICT(guild_id,player_id) DO NOTHING",
-              (guild_id, target_id))
-    if category == "best_liar":
-        c.execute("UPDATE reputation_totals SET best_liar=best_liar+1 WHERE guild_id=? AND player_id=?",
-                  (guild_id, target_id))
-    else:
-        c.execute("UPDATE reputation_totals SET most_helpful=most_helpful+1 WHERE guild_id=? AND player_id=?",
-                  (guild_id, target_id))
-    conn.commit()
-    conn.close()
-
-def db_get_reputation(guild_id, player_id):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("SELECT best_liar, most_helpful FROM reputation_totals WHERE guild_id=? AND player_id=?",
-              (guild_id, player_id))
-    row = c.fetchone()
-    conn.close()
-    return row or (0, 0)
-
-def db_get_reputation_leaderboard(guild_id):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("SELECT player_id, best_liar, most_helpful FROM reputation_totals "
-              "WHERE guild_id=? ORDER BY best_liar+most_helpful DESC LIMIT 20", (guild_id,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def db_already_voted_reputation(guild_id, voter_id, game_num, category):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM reputation WHERE guild_id=? AND voter_id=? AND game_num=? AND category=?",
-              (guild_id, voter_id, game_num, category))
-    count = c.fetchone()[0]
-    conn.close()
-    return count > 0
-
-# ── Prophecy helpers ──────────────────────────────────────────────────────
-def db_submit_prophecy(guild_id, player_id, wolf_guess_id, first_death_id, winner):
-    import time as _tp
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO prophecies VALUES (?,?,?,?,?,?)",
-              (guild_id, player_id, wolf_guess_id, first_death_id, winner, int(_tp.time())))
-    conn.commit()
-    conn.close()
-
-def db_get_prophecies(guild_id):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("SELECT player_id, wolf_guess, first_death, winner FROM prophecies WHERE guild_id=?",
-              (guild_id,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def db_clear_prophecies(guild_id):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("DELETE FROM prophecies WHERE guild_id=?", (guild_id,))
-    conn.commit()
-    conn.close()
-
-# ── Bounty helpers ────────────────────────────────────────────────────────
-def db_set_bounty(guild_id, player_id, bounty_type, target_id=0, target_role=""):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO bounties VALUES (?,?,?,?,?,?)",
-              (guild_id, player_id, bounty_type, target_id, target_role, 0))
-    conn.commit()
-    conn.close()
-
-def db_get_bounties(guild_id, player_id):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("SELECT bounty_type, target_id, target_role, completed FROM bounties WHERE guild_id=? AND player_id=?",
-              (guild_id, player_id))
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def db_complete_bounty(guild_id, player_id, bounty_type):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("UPDATE bounties SET completed=1 WHERE guild_id=? AND player_id=? AND bounty_type=?",
-              (guild_id, player_id, bounty_type))
-    conn.commit()
-    conn.close()
-
-def db_clear_bounties(guild_id):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("DELETE FROM bounties WHERE guild_id=?", (guild_id,))
-    conn.commit()
-    conn.close()
-
-# ── Spectator prediction helpers ──────────────────────────────────────────
-def db_get_spectator_points(guild_id, player_id):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("SELECT points FROM spectator_points WHERE guild_id=? AND player_id=?",
-              (guild_id, player_id))
-    row = c.fetchone()
-    if not row:
-        c.execute("INSERT INTO spectator_points VALUES (?,?,?)", (guild_id, player_id, 100))
-        conn.commit()
-        row = (100,)
-    conn.close()
-    return row[0]
-
-def db_add_spectator_points(guild_id, player_id, amount):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("INSERT INTO spectator_points VALUES (?,?,?) ON CONFLICT(guild_id,player_id) "
-              "DO UPDATE SET points=points+?", (guild_id, player_id, 100, amount))
-    conn.commit()
-    conn.close()
-
-def db_submit_spectator_prediction(guild_id, player_id, pred_type, prediction, points_bet):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("INSERT OR REPLACE INTO spectator_predictions VALUES (?,?,?,?,?,?)",
-              (guild_id, player_id, pred_type, prediction, points_bet, 0))
-    conn.commit()
-    conn.close()
-
-def db_get_spectator_predictions(guild_id):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("SELECT player_id, pred_type, prediction, points_bet, correct FROM spectator_predictions WHERE guild_id=?",
-              (guild_id,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def db_get_spectator_leaderboard(guild_id):
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("SELECT player_id, points FROM spectator_points WHERE guild_id=? ORDER BY points DESC LIMIT 15",
-              (guild_id,))
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-def db_get_game_count(guild_id):
-    """Return the total number of games recorded for this guild."""
-    conn = sqlite3.connect(DB_FILE)
-    c    = conn.cursor()
-    c.execute("SELECT COUNT(DISTINCT game_num) FROM player_stats WHERE guild_id=?", (guild_id,))
-    row = c.fetchone()
-    conn.close()
-    return row[0] if row else 0
-
-
-def get_disney_role(role_name: str) -> tuple:
-    """Return (disney_name, team) for a role, or original name if not mapped."""
-    return DISNEY_ROLE_MAP.get(role_name, (role_name, None))
-
-def get_disney_channel_name(base_name: str, font: str, emoji: str = "") -> str:
-    """Return Disney-themed channel name if disney mode, else standard ch_name."""
-    disney_name = DISNEY_CHANNEL_NAMES.get(base_name, base_name)
-    styled = apply_font(disney_name, font)
-    base   = f"{emoji}{styled}" if emoji else styled
-    return base.replace(" ", "-")
-
-def get_theme_labels(guild_id: int) -> dict:
-    """Return theme-appropriate labels for teams and setting name."""
-    state   = cached_get_state(guild_id) or {}
-    disney  = bool(state.get("disney_mode", 0))
-    hp      = bool(state.get("hp_mode", 0))
-    if disney:
-        return {
-            "village":      "Heroes",
-            "wolf":         "Villains",
-            "neutral":      "Enchanted",
-            "setting":      "the Enchanted Kingdom",
-            "village_icon": "🏰",
-            "wolf_icon":    "⚔️",
-            "neutral_icon": "✨",
-            "den_name":     "Villain Lair",
-        }
-    elif hp:
-        return {
-            "village":      "Order of the Phoenix",
-            "wolf":         "Death Eaters",
-            "neutral":      "Unaligned",
-            "setting":      "the Wizarding World",
-            "village_icon": "⚡",
-            "wolf_icon":    "🐍",
-            "neutral_icon": "🌙",
-            "den_name":     "Chamber of Secrets",
-        }
-    else:
-        return {
-            "village":      "Village",
-            "wolf":         "Wolves",
-            "neutral":      "Neutral",
-            "setting":      "Whisperfall",
-            "village_icon": "🏘️",
-            "wolf_icon":    "🐺",
-            "neutral_icon": "⚖️",
-            "den_name":     "Wolf Den",
-        }
-
-
-def is_disney_mode(guild_id: int) -> bool:
-    """Check if this guild's current game is running in Disney theme."""
-    state = cached_get_state(guild_id) or {}
-    return bool(state.get("disney_mode", 0))
-
-
-# ====================== HARRY POTTER THEME ======================
-
-HP_ROLE_MAP = {
-    # Death Eaters (Wolves)
-    "Wolf":         ("Death Eater",        "wolf"),
-    "Alpha":        ("Grindelwald",        "wolf"),
-    "Elite Alpha":  ("Voldemort",          "wolf"),
-    "Blessed Wolf": ("Fenrir Greyback",    "wolf"),
-    "Bloodhound":   ("Nagini",             "wolf"),
-    "Bloodletter":  ("Dolores Umbridge",   "wolf"),
-    "Crazed Wolf":  ("Barty Crouch Jr.",   "wolf"),
-    "Dire Wolf":    ("Wormtail",           "wolf"),
-    "Echo-Stalker": ("Mundungus Fletcher", "wolf"),
-    "Shadow Wolf":  ("Igor Karkaroff",     "wolf"),
-    "Werekitten":   ("Bellatrix Lestrange","wolf"),
-    "Wolf Pup":     ("Draco Malfoy",       "wolf"),
-    # Order of the Phoenix (Village)
-    "Villager":          ("Hogwarts Student",      "village"),
-    "Seer":              ("Professor Trelawney",   "village"),
-    "Doctor":            ("Madam Pomfrey",         "village"),
-    "Surgeon":           ("Newt Scamander",        "village"),
-    "Huntsman":          ("Harry Potter",          "village"),
-    "Sheriff":           ("Hermione Granger",      "village"),
-    "Medium":            ("Moaning Myrtle",        "village"),
-    "Mayor":             ("Albus Dumbledore",      "village"),
-    "Governor":          ("Minister Fudge",        "village"),
-    "Elder":             ("Nicolas Flamel",        "village"),
-    "Insomniac":         ("Dobby",                 "village"),
-    "Agitator":          ("Fred Weasley",          "village"),
-    "Hermit":            ("Hagrid",                "village"),
-    "Cupid":             ("Lavender Brown",        "village"),
-    "Gravedigger":       ("Peeves",                "village"),
-    "Clone":             ("Polyjuice Potion",      "village"),
-    "Shapeshifter":      ("Nymphadora Tonks",      "village"),
-    "Drunk":             ("Seamus Finnigan",       "village"),
-    "Pothead":           ("Neville Longbottom",    "village"),
-    "Flirt":        ("Madam Rosmerta",        "village"),
-    "Jafar":             ("Professor Slughorn",    "village"),
-    "Lycan":             ("Remus Lupin",           "village"),
-    "Time Lord":         ("Hermione's Time-Turner","village"),
-    "Village Idiot":     ("Crabbe",                "village"),
-    "Village Jokester":  ("George Weasley",        "village"),
-    "Virgin":            ("Ginny Weasley",         "village"),
-    "Traitor":           ("Severus Snape",         "village"),
-    "White Wolf":        ("Sirius Black",          "village"),
-    # Unaligned (Neutral)
-    "Witch":     ("Sybill Trelawney",  "neutral"),
-    "Oracle":    ("The Sorting Hat",   "neutral"),
-    "Warlock":   ("Gilderoy Lockhart", "neutral"),
-    "Fairy Elf": ("Dobby (Free Elf)",  "neutral"),
-    "Wraith":    ("Dementors",         "neutral"),
-    "Diseased":  ("Argus Filch",       "village"),
-    "Flirt":     ("Madam Rosmerta",    "village"),
-}
-
-HP_CHANNEL_NAMES = {
-    "mod-log":      "headmaster-office",
-    "player-list":  "marauders-map",
-    "role-list":    "sorting-results",
-    "night-order":  "spell-order",
-    "day-vote":     "wizengamot",
-    "timeline":     "hogwarts-chronicle",
-    "stats":        "house-points",
-    "blood-board":  "daily-prophet",
-    "wolf-den":     "chamber-of-secrets",
-    "ghost-chat":   "nearly-headless-lounge",
-    "wraith-den":   "dementor-lair",
-    "win-tracker":  "order-balance",
-    "village-chat": "great-hall",
-    "spectator-qa": "owlery",
-}
-
-HP_TEAMS = {
-    "wolf":    "Death Eaters",
-    "village": "Order of the Phoenix",
-    "neutral": "Unaligned",
-}
-
-def get_hp_role(role_name: str) -> tuple:
-    """Return (hp_name, team) for a role, or original name if not mapped."""
-    return HP_ROLE_MAP.get(role_name, (role_name, None))
-
-def is_hp_mode(guild_id: int) -> bool:
-    """Check if this guild's current game is running in Harry Potter theme."""
-    state = cached_get_state(guild_id) or {}
-    return bool(state.get("hp_mode", 0))
-
 
 class ChaosModeView(View):
     """
