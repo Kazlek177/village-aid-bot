@@ -636,6 +636,14 @@ def init_db():
     except Exception:
         pass
     try:
+        c.execute("ALTER TABLE game_state ADD COLUMN disney_mode INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        c.execute("ALTER TABLE game_state ADD COLUMN hp_mode INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
         c.execute("ALTER TABLE game_state ADD COLUMN shadow_token_target INTEGER DEFAULT NULL")
     except Exception:
         pass
@@ -649,10 +657,6 @@ def init_db():
         pass
     try:
         c.execute("ALTER TABLE game_state ADD COLUMN decoy_token_owner INTEGER DEFAULT NULL")
-    except Exception:
-        pass
-    try:
-        c.execute("ALTER TABLE game_state ADD COLUMN hp_mode INTEGER DEFAULT 0")
     except Exception:
         pass
 
