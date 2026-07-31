@@ -1,0 +1,112 @@
+{
+  "timestamp": 1783703228,
+  "guild_id": "1478557788610494484",
+  "state": {
+    "guild_id": "1478557788610494484",
+    "phase": "night",
+    "night_duration": "36000",
+    "day_duration": "50400",
+    "category_id": "1525186272874729602",
+    "wolf_channel_id": "1525186288851095582",
+    "wolf_vote_channel_id": "None",
+    "ghost_channel_id": "1525186290079891527",
+    "mod_log_channel_id": "1525186274129088552",
+    "wheel_channel_id": "None",
+    "player_list_ch_id": "1525186275525656769",
+    "role_list_ch_id": "1525186276486283364",
+    "day_vote_ch_id": "1525186280185659435",
+    "timeline_ch_id": "1525186281682899066",
+    "stats_ch_id": "1525186283067019420",
+    "player_list_msg_id": "1525186368429625508",
+    "role_list_msg_id": "1525186374032949369",
+    "day_vote_msg_id": "1525186374825676923",
+    "wolf_vote_msg_id": "None",
+    "timeline_msg_id": "1525186375811596421",
+    "mod_role_id": "1478564573975023716",
+    "participant_role_id": "1478564453187457135",
+    "dead_role_id": "1478564839759548619",
+    "spectator_role_id": "1481827311903834142",
+    "day_vote_end_time": "None",
+    "font_style": "default",
+    "votes_per_player": "1",
+    "werekitten_silenced_night": "0",
+    "_pending_elim_reason": "None",
+    "_pending_elim_day": "0",
+    "jafar_last_role": "",
+    "traitor_switched": "0",
+    "agitator_frenzy_day": "None",
+    "bb_channel_id": "1525186287273906381",
+    "agitator_elim_count": "0",
+    "night_end_time": "None",
+    "win_tracker_ch_id": "1525186291518541997",
+    "anon_vote": "0",
+    "village_chat_ch_id": "1525186292764250255",
+    "mod_dashboard_msg_id": "1525186390151794812",
+    "night_bb_done": "0",
+    "day_bb_done": "0",
+    "investigations_done": "0",
+    "time_lord_triggered": "0",
+    "spec_qa_ch_id": "1525186284015063161",
+    "chaos_hide_roles": "0",
+    "chaos_hide_count": "0",
+    "disney_mode": "1",
+    "hp_mode": "0"
+  },
+  "assignments": [
+    [
+      "213852323884171275",
+      "Surgeon",
+      "1",
+      "1525186299231994006"
+    ],
+    [
+      "558274584458166325",
+      "Werekitten",
+      "1",
+      "1525186324624179200"
+    ],
+    [
+      "683157933177176064",
+      "Jafar",
+      "1",
+      "1525186350662291516"
+    ],
+    [
+      "692568003547758643",
+      "Agitator",
+      "1",
+      "1525186319569911858"
+    ],
+    [
+      "696022048618709002",
+      "Mayor",
+      "1",
+      "1525186293796044980"
+    ],
+    [
+      "1031641696825528330",
+      "Alpha",
+      "1",
+      "1525186338188427345"
+    ],
+    [
+      "1145751467517550702",
+      "Doctor",
+      "1",
+      "1525186332626911377"
+    ],
+    [
+      "1471203883404623935",
+      "Seer",
+      "1",
+      "1525186344416972936"
+    ]
+  ],
+  "log": [
+    [
+      "1783703170",
+      "Night 1",
+      "\ud83c\udfae Game started \u2014 Night 1 begins"
+    ]
+  ]
+}

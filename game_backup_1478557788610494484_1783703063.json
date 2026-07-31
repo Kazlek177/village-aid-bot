@@ -1,0 +1,115 @@
+{
+  "timestamp": 1783703063,
+  "guild_id": "1478557788610494484",
+  "state": {
+    "guild_id": "1478557788610494484",
+    "phase": "day",
+    "night_duration": "36000",
+    "day_duration": "50400",
+    "category_id": "1523060464647409735",
+    "wolf_channel_id": "1523060483106537653",
+    "wolf_vote_channel_id": "None",
+    "ghost_channel_id": "1523060484335730941",
+    "mod_log_channel_id": "1523060466358816920",
+    "wheel_channel_id": "None",
+    "player_list_ch_id": "1523060467948458154",
+    "role_list_ch_id": "1523060469005287495",
+    "day_vote_ch_id": "1523060472352477295",
+    "timeline_ch_id": "1523060473187008554",
+    "stats_ch_id": "1523060474994888744",
+    "player_list_msg_id": "1523060523103551489",
+    "role_list_msg_id": "1523060526920237189",
+    "day_vote_msg_id": "1523060788191957124",
+    "wolf_vote_msg_id": "1523060614547767549",
+    "timeline_msg_id": "1523060529084633229",
+    "mod_role_id": "1478564573975023716",
+    "participant_role_id": "1478564453187457135",
+    "dead_role_id": "1478564839759548619",
+    "spectator_role_id": "1481827311903834142",
+    "day_vote_end_time": "1783209600",
+    "font_style": "bold_serif",
+    "votes_per_player": "1",
+    "werekitten_silenced_night": "0",
+    "_pending_elim_reason": "None",
+    "_pending_elim_day": "0",
+    "jafar_last_role": "",
+    "traitor_switched": "0",
+    "agitator_frenzy_day": "None",
+    "bb_channel_id": "1523060481793855548",
+    "agitator_elim_count": "0",
+    "night_end_time": "None",
+    "win_tracker_ch_id": "1523060485409476879",
+    "anon_vote": "0",
+    "village_chat_ch_id": "1523060487544246453",
+    "mod_dashboard_msg_id": "1523060538387595355",
+    "night_bb_done": "0",
+    "day_bb_done": "0",
+    "investigations_done": "1",
+    "time_lord_triggered": "0",
+    "spec_qa_ch_id": "1523060476324610129",
+    "chaos_hide_roles": "0",
+    "chaos_hide_count": "0",
+    "disney_mode": "0",
+    "hp_mode": "0"
+  },
+  "assignments": [
+    [
+      "213852323884171275",
+      "Villager",
+      "1",
+      "1523060493433049098"
+    ],
+    [
+      "558274584458166325",
+      "Villager",
+      "1",
+      "1523060497962893515"
+    ],
+    [
+      "683157933177176064",
+      "Villager",
+      "1",
+      "1523060511934124062"
+    ],
+    [
+      "696022048618709002",
+      "Alpha",
+      "1",
+      "1523060489142276206"
+    ],
+    [
+      "1021285414822236170",
+      "Villager",
+      "1",
+      "1523060507081441441"
+    ],
+    [
+      "1145751467517550702",
+      "Villager",
+      "1",
+      "1523060502673100922"
+    ]
+  ],
+  "log": [
+    [
+      "1783196328",
+      "Night 1",
+      "\ud83c\udfae Game started \u2014 Night 1 begins"
+    ],
+    [
+      "1783196348",
+      "Night 1",
+      "\ud83c\udf19 Night 1 began (600 min timer)"
+    ],
+    [
+      "1783196379",
+      "Night 1",
+      "\ud83c\udf19 Night 1 resolved \u2014 awaiting mod day start"
+    ],
+    [
+      "1783196390",
+      "Day 1",
+      "\u2600\ufe0f Day 1 started \u2014 vote opened"
+    ]
+  ]
+}

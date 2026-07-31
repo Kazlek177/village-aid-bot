@@ -644,6 +644,10 @@ def init_db():
     except Exception:
         pass
     try:
+        c.execute("ALTER TABLE game_state ADD COLUMN greek_mode INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
         c.execute("ALTER TABLE game_state ADD COLUMN shadow_token_target INTEGER DEFAULT NULL")
     except Exception:
         pass
@@ -657,6 +661,14 @@ def init_db():
         pass
     try:
         c.execute("ALTER TABLE game_state ADD COLUMN decoy_token_owner INTEGER DEFAULT NULL")
+    except Exception:
+        pass
+    try:
+        c.execute("ALTER TABLE game_state ADD COLUMN alibi_token_target INTEGER DEFAULT NULL")
+    except Exception:
+        pass
+    try:
+        c.execute("ALTER TABLE game_state ADD COLUMN alibi_token_owner INTEGER DEFAULT NULL")
     except Exception:
         pass
 
@@ -858,8 +870,8 @@ DEFAULT_ROLES = [
     ("Pothead",         "village", 1,
      "If eaten by the wolves, they get the munchies — giving the wolves a second kill that night."),
     ("Flirt",      "village", 1,
-     "Can ONLY communicate via sexual innuendo, gifs, emojis, or suggestive words. "
-     "If caught being pure even once, contracts a horrendous STD and dies."),
+     "Each night visits a player of their choice, blocking that player's night action. "
+     "The visited player does not know they were visited. Charming by nature — no restrictions on how they communicate."),
     ("Seer",            "village", 1,
      "Can ask the mod once each night if a specific player is a wolf. Receives yes or no. "
      "Cannot disclose if they identified a wolf or villager — doing so results in immediate death."),
@@ -956,6 +968,16 @@ DEFAULT_ROLES = [
      "but cannot mark and kill on the same night. If both die before Kill Command fires, all marks dissolve. "
      "Appears as Neutral to Seer and Medium. Doctor/Surgeon saves do NOT work against the Kill Command. "
      "Win: Wraiths alive and equal or outnumber BOTH village and wolf teams simultaneously."),
+
+    ("Chaos Gremlin",   "neutral", 1,
+     "Pure chaos in player form. Each day, a wheel spins to decide who you must vote for — "
+     "you are told privately and must cast that vote or lose your ability. "
+     "Each night, a wheel spins across all role abilities (excluding Alpha and Elite Alpha turns) — "
+     "you receive that ability for one night only. If you spin Clone and no one has died, the ability is lost. "
+     "If you spin Agitator, you may use it even if someone else already has. "
+     "Appears as Neutral to Seer and Medium. "
+     "Win: Be alive when the game ends — regardless of which team wins. "
+     "Your win is independent. Finding the Chaos Gremlin before the end is in everyone's interest."),
 ]
 
 def load_default_roles(guild_id):
@@ -1048,13 +1070,16 @@ def ch_name(label: str, style: str, emoji: str = "") -> str:
     return base.replace(" ", "-")
 
 def ch_name_themed(label: str, style: str, emoji: str = "",
-                   disney: bool = False, hp: bool = False) -> str:
-    """Return a themed channel name if disney=True or hp=True, otherwise standard."""
+                   disney: bool = False, hp: bool = False, greek: bool = False) -> str:
+    """Return a themed channel name."""
     if disney:
         themed = DISNEY_CHANNEL_NAMES.get(label, label)
         return ch_name(themed, style, emoji)
     if hp:
         themed = HP_CHANNEL_NAMES.get(label, label)
+        return ch_name(themed, style, emoji)
+    if greek:
+        themed = GREEK_CHANNEL_NAMES.get(label, label)
         return ch_name(themed, style, emoji)
     return ch_name(label, style, emoji)
 
@@ -2531,6 +2556,7 @@ def get_bb_hints_for_game(guild_id: int) -> dict:
     state    = cached_get_state(guild_id) or {}
     disney   = bool(state.get("disney_mode", 0))
     hp       = bool(state.get("hp_mode", 0))
+    greek    = bool(state.get("greek_mode", 0))
     rows     = db_get_assignments(guild_id)
 
     if not rows:
@@ -2539,7 +2565,7 @@ def get_bb_hints_for_game(guild_id: int) -> dict:
     game_roles = {r[1] for r in rows}
     hints      = {role: h for role, h in BB_ROLE_HINTS.items() if role in game_roles}
 
-    if not disney and not hp:
+    if not disney and not hp and not greek:
         return hints
 
     # Remap role names to themed names in hint keys
@@ -2549,10 +2575,11 @@ def get_bb_hints_for_game(guild_id: int) -> dict:
             themed_name, _ = get_disney_role(role)
         elif hp:
             themed_name, _ = get_hp_role(role)
+        elif greek:
+            themed_name, _ = get_greek_role(role)
         else:
             themed_name = role
 
-        # Replace Whisperfall/village/wolf language with Kingdom/Heroes/Villains
         new_hints = {}
         for event, body in role_hints.items():
             if disney:
@@ -2581,8 +2608,20 @@ def get_bb_hints_for_game(guild_id: int) -> dict:
                     .replace("wolf ", "Death Eater ")
                     .replace("Wolf ", "Death Eater ")
                 )
+            elif greek:
+                body = (body
+                    .replace("Whisperfall", "Mount Olympus")
+                    .replace("the village", "the Olympians")
+                    .replace("the Village", "the Olympians")
+                    .replace("the wolves", "the Titans")
+                    .replace("the wolf", "the Titan")
+                    .replace("the den", "the Titan Throne")
+                    .replace("the pack", "the Titan council")
+                    .replace("the square", "the great forum")
+                    .replace("wolf ", "Titan ")
+                    .replace("Wolf ", "Titan ")
+                )
             new_hints[event] = body
-        # Use themed name as the key so the UI shows the character name
         display_name = f"{themed_name} ({role})" if themed_name != role else role
         themed_hints[display_name] = new_hints
 
@@ -2739,6 +2778,7 @@ def build_role_list_embed(final_counts, all_roles, guild_id=None):
     # Get theme labels if applicable
     disney = bool((cached_get_state(guild_id) or {}).get("disney_mode", 0)) if guild_id else False
     hp     = bool((cached_get_state(guild_id) or {}).get("hp_mode", 0))     if guild_id else False
+    greek  = bool((cached_get_state(guild_id) or {}).get("greek_mode", 0))  if guild_id else False
     t      = get_theme_labels(guild_id) if guild_id else {"village": "Village", "wolf": "Wolves", "neutral": "Neutral", "village_icon": "📜", "wolf_icon": "🐺", "neutral_icon": "⚖️"}
 
     village_lines, wolf_lines, neutral_lines = [], [], []
@@ -2753,6 +2793,9 @@ def build_role_list_embed(final_counts, all_roles, guild_id=None):
             display = f"**{themed_name}** *(as {role_name})*" if themed_name != role_name else f"**{role_name}**"
         elif hp:
             themed_name, _ = get_hp_role(role_name)
+            display = f"**{themed_name}** *(as {role_name})*" if themed_name != role_name else f"**{role_name}**"
+        elif greek:
+            themed_name, _ = get_greek_role(role_name)
             display = f"**{themed_name}** *(as {role_name})*" if themed_name != role_name else f"**{role_name}**"
         else:
             display = f"**{role_name}**"
@@ -3511,8 +3554,10 @@ async def use_token(interaction: discord.Interaction, token_type: str):
     token = TOKENS.get(token_type, {})
 
     # Tokens that need a target — show a target selector
-    if token_type in ("peek", "save", "silence", "reveal", "shadow", "decoy"):
-        view = TokenTargetView(interaction.guild_id, interaction.user.id, token_type)
+    if token_type in ("peek", "save", "silence", "reveal", "shadow", "decoy",
+                       "frame", "redirect", "alibi", "bloodscent"):
+        view = TokenTargetView(interaction.guild_id, interaction.user.id,
+                               token_type, guild=interaction.guild)
         await interaction.followup.send(
             f"**{token['emoji']} {token['name']}** — Choose your target:",
             view=view, ephemeral=True)
@@ -3645,6 +3690,7 @@ async def use_token(interaction: discord.Interaction, token_type: str):
             "pardon":      "🕊️ **Pardon Token activated.** If you receive the most votes today you will be spared. The mod has been notified.",
             "grave":       "⚰️ **Grave Token registered.** If you are eliminated, you will get one final anonymous message to post.",
             "mirror":      "🪞 **Mirror Token activated.** If the wolves target you tonight, the kill reflects back on them.",
+            "vanish":      "👻 **Vanish Token activated.** Your night action leaves no trace tonight. Insomniac, Shadow Token, and tracking abilities cannot detect you.",
         }
         await interaction.followup.send(messages.get(token_type, "✅ Token activated."), ephemeral=True)
         await post_mod_log(interaction.guild,
@@ -3653,17 +3699,24 @@ async def use_token(interaction: discord.Interaction, token_type: str):
 
 class TokenTargetView(View):
     """Shown when a token requires a target player."""
-    def __init__(self, guild_id, owner_id, token_type):
+    def __init__(self, guild_id, owner_id, token_type, guild=None):
         super().__init__(timeout=120)
         self.guild_id   = guild_id
         self.owner_id   = owner_id
         self.token_type = token_type
-        rows = db_get_assignments(guild_id)
+        rows  = db_get_assignments(guild_id)
         alive = [r for r in rows if r[2] == 1 and r[0] != owner_id]
         if alive:
             opts = []
             for r in alive[:25]:
-                opts.append(discord.SelectOption(label=f"Player {r[0]}", value=str(r[0])))
+                # Resolve display name if guild available
+                name = None
+                if guild:
+                    m = guild.get_member(r[0])
+                    if m:
+                        name = m.display_name[:80]
+                label = name or f"Player {r[0]}"
+                opts.append(discord.SelectOption(label=label, value=str(r[0])))
             sel = Select(placeholder="Choose a target...", options=opts,
                          custom_id=f"tok_target_{guild_id}_{owner_id}_{token_type}")
             sel.callback = self.on_target
@@ -3703,7 +3756,6 @@ class TokenTargetView(View):
             db_set_state(self.guild_id, **{"decoy_token_target": target_id,
                                             "decoy_token_owner":  interaction.user.id})
             night_num = db_get_night_num(self.guild_id)
-            # Record as a wolf vote override
             await interaction.response.send_message(
                 f"🎪 **Decoy Token activated.** The wolf kill will be redirected to **{tname}** tonight.\n"
                 f"*The den will not know their vote was overridden.*",
@@ -3712,13 +3764,57 @@ class TokenTargetView(View):
                 f"🎪 **Decoy Token** — {interaction.user.display_name} redirected wolf kill to **{tname}** tonight.\n"
                 f"⚠️ Override the wolf kill target manually when resolving Night {night_num}.")
 
-        else:
+        elif self.token_type == "alibi":
+            # Redirect any investigation of the token user to the decoy target
+            db_set_state(self.guild_id, **{"alibi_token_target": target_id,
+                                            "alibi_token_owner":  interaction.user.id})
             await interaction.response.send_message(
-                f"✅ **{token.get('emoji','')} {token.get('name','')}** activated on **{tname}**.\n"
-                f"The mod has been notified.", ephemeral=True)
+                f"📋 **Alibi Token activated.** Any investigation targeting you tonight will be "
+                f"silently redirected to **{tname}** instead.\n"
+                f"*Seer, Medium, and Bloodhound results will show them — not you. Clears at dawn.*",
+                ephemeral=True)
             await post_mod_log(interaction.guild,
-                f"🎒 **{token.get('name', self.token_type)} used** — "
-                f"{interaction.user.display_name} → target: {tname}")
+                f"📋 **Alibi Token** — {interaction.user.display_name} set decoy to **{tname}**.\n"
+                f"⚠️ If Seer, Medium, or Bloodhound investigates {interaction.user.display_name} tonight, "
+                f"return results for **{tname}** instead. Clear alibi state at dawn.")
+
+        elif self.token_type == "frame":
+            await interaction.response.send_message(
+                f"🖼️ **Frame Token activated.** Any investigation of **{tname}** tonight will "
+                f"return wolf-aligned regardless of their actual role.\n"
+                f"*The mod has been notified to apply this when resolving investigations.*",
+                ephemeral=True)
+            await post_mod_log(interaction.guild,
+                f"🖼️ **Frame Token** — {interaction.user.display_name} framed **{tname}**.\n"
+                f"⚠️ If Seer, Medium, or Bloodhound investigates {tname} tonight, return wolf-aligned result.")
+
+        elif self.token_type == "redirect":
+            await interaction.response.send_message(
+                f"↩️ **Redirect Token activated.** You have chosen **{tname}** as the redirect target.\n"
+                f"*The mod will be prompted to redirect one player's night action to {tname} instead of their chosen target.*",
+                ephemeral=True)
+            await post_mod_log(interaction.guild,
+                f"↩️ **Redirect Token** — {interaction.user.display_name} wants to redirect a night action to **{tname}**.\n"
+                f"⚠️ Pick one player's submitted night action and change its target to {tname}.")
+
+        elif self.token_type == "bloodscent":
+            await interaction.response.send_message(
+                f"🩸 **Bloodscent Token activated.** You will learn at dawn which player "
+                f"the Seer, Medium, or Bloodhound investigated last night.\n"
+                f"*The mod will deliver this to your private channel when resolving the night.*",
+                ephemeral=True)
+            await post_mod_log(interaction.guild,
+                f"🩸 **Bloodscent Token** — {interaction.user.display_name} activated Bloodscent.\n"
+                f"⚠️ At dawn, send them the name of whoever Seer/Medium/Bloodhound investigated last night.")
+
+        elif self.token_type == "vanish":
+            await interaction.response.send_message(
+                f"👻 **Vanish Token activated.** Your night action leaves no trace tonight.\n"
+                f"*Insomniac hints, Shadow Token reports, and tracking abilities cannot detect you. The mod has been notified.*",
+                ephemeral=True)
+            await post_mod_log(interaction.guild,
+                f"👻 **Vanish Token** — {interaction.user.display_name} is invisible tonight.\n"
+                f"⚠️ Exclude them from any Insomniac hints, Shadow Token reports, or tracking results this night.")
 
         if self.token_type not in ("shadow", "decoy"):
             await post_mod_log(interaction.guild,
@@ -5374,8 +5470,9 @@ async def update_mod_dashboard(guild):
 
 async def _run_start_day(guild, guild_id, night_num, state):
     """Shared day-start logic used by dashboard and StartDayPromptView."""
-    actions  = db_get_night_actions(guild_id, night_num)
-    frenzy   = any(a[1] == "agitator_frenzy" for a in actions)
+    # Read PREVIOUS night's actions for frenzy — frenzy submitted on night N fires on day N
+    prev_actions = db_get_night_actions(guild_id, night_num - 1) if night_num > 1 else []
+    frenzy   = any(a[1] == "agitator_frenzy" for a in prev_actions)
     rows     = db_get_assignments(guild_id)
     _day_dur = int(state.get("day_duration") or 43200)
     end_ts   = _phase_end_ts(_day_dur, 20, guild_id)
@@ -5425,6 +5522,8 @@ async def _run_start_day(guild, guild_id, night_num, state):
     safe_task(_night_approach_warning(guild, guild_id), "night_warning")
     # Daily Rumor Mill — AI-generated cryptic hint based on last night's actions
     safe_task(_post_rumor_mill(guild, guild_id, night_num), "rumor_mill")
+    # Chaos Gremlin day vote spin
+    safe_task(_spin_chaos_gremlin_day_vote(guild, guild_id, night_num), "chaos_gremlin_day")
 
 
 
@@ -5517,62 +5616,323 @@ async def _post_rumor_mill(guild, guild_id: int, night_num: int):
 
 
 async def _assign_bounties(guild, guild_id: int):
-    """Assign secret bounties to all players at game start."""
+    """Assign 3 role-aware quests to every player at game start."""
     import random as _rand
     import asyncio as _abio
-    # Wait briefly so private channels are fully created and cached
-    await _abio.sleep(3)
+    await _abio.sleep(3)  # Wait for channels to be cached
 
     rows  = db_get_assignments(guild_id)
     alive = [r for r in rows if r[2] == 1]
-    wolves    = [r for r in alive if get_team(guild_id, r[1]) == "wolf"]
-    villagers = [r for r in alive if get_team(guild_id, r[1]) == "village"]
-    wolf_roles = list({r[1] for r in wolves})
-
     db_clear_bounties(guild_id)
 
-    for r in wolves:
-        pid = r[0]
-        if wolf_roles:
-            target_role = _rand.choice(wolf_roles)
-            db_set_bounty(guild_id, pid, "wolf_kill_role", target_role=target_role)
+    disney = is_disney_mode(guild_id)
+    hp     = is_hp_mode(guild_id)
 
-        priv_ch = guild.get_channel(r[3]) if len(r) > 3 and r[3] else None
-        if not priv_ch:
-            try:
-                priv_ch = await guild.fetch_channel(r[3]) if len(r) > 3 and r[3] else None
-            except Exception:
-                pass
-        if priv_ch:
-            m = guild.get_member(pid)
-            embed = discord.Embed(
-                title       = "🎯 Your Bounty",
-                description = (
-                    f"**Wolf Bounty:** Make sure a **{target_role}** gets wolf-killed this game.\n\n"
-                    f"*Complete your bounty to earn a bonus token for the next game.*\n"
-                    f"*Use `/my_bounties` to check your progress.*"
-                ),
-                color = 0xC0392B
-            )
-            try:
-                await priv_ch.send(embed=embed)
-            except Exception as e:
-                print(f"[bounty] wolf send failed for {pid}: {e}")
+    # ── Quest pools ───────────────────────────────────────────────────────
 
-    for r in villagers:
-        pid    = r[0]
+    DEN_WOLVES = {"Wolf","Alpha","Elite Alpha","Blessed Wolf","Bloodletter",
+                  "Crazed Wolf","Dire Wolf","Werekitten","Echo-Stalker","Shadow Wolf"}
+
+    # Generic village quests — mixed in for all village roles
+    GENERIC_VILLAGE = [
+        ("survive_day3",        "Survive to Day 3 without being eliminated."),
+        ("never_top_vote",      "Never be the top vote recipient on any day."),
+        ("vote_correct_3",      "Vote for the player who ends up eliminated on 3 different days."),
+        ("never_abstain",       "Never abstain from a vote all game."),
+        ("vote_first_2",        "Be the first player to cast a vote on 2 different days."),
+        ("outlast_half",        "Outlast at least half the starting players."),
+        ("never_change_vote",   "Never change your vote once cast, all game."),
+    ]
+
+    # Den wolf quests
+    DEN_QUESTS = [
+        ("den_unanimous_2",     "Den achieves a unanimous kill vote 2 nights in a row."),
+        ("den_kill_seer",       "Den successfully kills the Seer before Night 3."),
+        ("den_kill_protected",  "Den kill goes through despite Doctor or Huntsman protection."),
+        ("den_kill_sheriff",    "Den kills the Sheriff before Day 3."),
+        ("den_kill_doctor",     "Den kills the Doctor before Night 3."),
+        ("den_3_roles",         "Den kills 3 different village roles in consecutive nights."),
+        ("den_last_wolf",       "Be the last wolf standing at game end."),
+        ("den_survive_final4",  "Survive to the final 4 alive players."),
+        ("den_sway_vote",       "Publicly vote for a village player on 2 different days and they get eliminated."),
+        ("den_vote_against",    "Successfully vote against the same village player on 3 different days."),
+        ("den_vote_wolf_safe",  "Cast a vote on a non-wolf player every single day without abstaining."),
+        ("den_mislead_vote",    "Vote for a village player who receives the most votes on 2 different days."),
+    ]
+
+    # Role-specific quest pools
+    ROLE_QUESTS = {
+        "Villager": [
+            ("vote_correct_3",      "Vote for the eliminated player on 3 different days."),
+            ("never_top_vote",      "Never be the top vote recipient on any day."),
+            ("survive_day4",        "Survive to Day 4."),
+            ("vote_first_2",        "Be the first to cast a vote on 2 different days."),
+        ],
+        "Seer": [
+            ("seer_find_2_wolves",  "Correctly identify 2 wolves through investigation before Day 3."),
+            ("seer_find_alpha",     "Find the Alpha or Elite Alpha through investigation."),
+            ("seer_investigate_every", "Investigate every night without missing one."),
+            ("seer_survive_day3",   "Survive to Day 3 without being eliminated."),
+        ],
+        "Doctor": [
+            ("doctor_save_night1",  "Successfully use your save on Night 1."),
+            ("doctor_save_attacked","Save a player from a wolf kill successfully."),
+            ("doctor_survive_day3", "Survive to Day 3."),
+            ("doctor_save_3",       "Use your save ability 3 separate nights."),
+        ],
+        "Surgeon": [
+            ("surgeon_save_1",      "Successfully use a save at least once."),
+            ("surgeon_save_3",      "Use all 3 of your saves in a single game."),
+            ("surgeon_survive_day3","Survive to Day 3."),
+            ("surgeon_save_targeted","Save a player the wolves had targeted on a previous night."),
+        ],
+        "Huntsman": [
+            ("huntsman_guard_attacked","Guard a player on the night they are attacked."),
+            ("huntsman_guard_3",    "Guard 3 different players across the game."),
+            ("huntsman_survive_day3","Survive to Day 3."),
+            ("huntsman_never_same", "Never guard the same player twice in a row."),
+        ],
+        "Sheriff": [
+            ("sheriff_survive_attack","Survive a wolf kill attempt thanks to your passive."),
+            ("sheriff_survive_day3", "Survive to Day 3."),
+            ("sheriff_never_top_vote","Never be the top vote recipient on any day."),
+            ("sheriff_last_villager","Be the last villager standing."),
+        ],
+        "Medium": [
+            ("medium_find_wolf",    "Your nightly alignment reveal identifies a wolf."),
+            ("medium_3_nights",     "Use your ability 3 nights in a row."),
+            ("medium_survive_day3", "Survive to Day 3."),
+            ("medium_find_alpha",   "Your ability reveals the Alpha or Elite Alpha."),
+        ],
+        "Mayor": [
+            ("mayor_break_tie",     "Successfully use your tie-breaking ability in a game."),
+            ("mayor_survive_day3",  "Survive to Day 3."),
+            ("mayor_correct_tie",   "Break a tie vote in favour of a wolf being eliminated."),
+            ("mayor_vote_first",    "Be the first to cast a vote on 3 different days."),
+        ],
+        "Governor": [
+            ("governor_pardon_village","Pardon a player who turns out to be village-aligned."),
+            ("governor_pardon_before2","Use your pardon before Day 2 ends."),
+            ("governor_survive_day3", "Survive to Day 3."),
+            ("governor_never_voted",  "Never be the top vote recipient on any day."),
+        ],
+        "Elder": [
+            ("elder_survive_kill",  "Survive a wolf kill attempt using your ability."),
+            ("elder_final5",        "Still be alive in the final 5 players."),
+            ("elder_never_voted",   "Never be the top vote recipient on any day."),
+            ("elder_survive_day4",  "Survive to Day 4."),
+        ],
+        "Insomniac": [
+            ("insomniac_share_info","Share wolf role information that leads to a vote elimination."),
+            ("insomniac_survive_day3","Survive to Day 3."),
+            ("insomniac_find_alpha","Receive the Alpha or Elite Alpha in your nightly reveal."),
+            ("insomniac_never_voted","Never be the top vote recipient on any day."),
+        ],
+        "Agitator": [
+            ("agitator_trigger_frenzy","Successfully trigger a frenzy vote."),
+            ("agitator_frenzy_wolf","Trigger a frenzy that results in a wolf elimination."),
+            ("agitator_survive_day3","Survive to Day 3."),
+            ("agitator_vote_correct","Vote for the eliminated player on 3 different days."),
+        ],
+        "Hermit": [
+            ("hermit_save_from_vote","Hide a player who would have been eliminated and second-highest is a wolf."),
+            ("hermit_hide_3",       "Successfully hide a player on 3 different days."),
+            ("hermit_survive_day3", "Survive to Day 3."),
+            ("hermit_never_voted",  "Never be the top vote recipient on any day."),
+        ],
+        "Cupid": [
+            ("cupid_chain_elim",    "Create a bond that results in a chain elimination."),
+            ("cupid_2_bonds",       "Create 2 different bonds in one game."),
+            ("cupid_survive_day3",  "Survive to Day 3."),
+            ("cupid_opposite_bond", "Bond two players who are on opposite teams."),
+        ],
+        "Gravedigger": [
+            ("gravedigger_share",   "Share cause-of-death information that leads to a wolf vote elimination."),
+            ("gravedigger_3_nights","Use your ability 3 nights in a row."),
+            ("gravedigger_survive_day3","Survive to Day 3."),
+            ("gravedigger_wolf_death","Learn the cause of death for a wolf elimination."),
+        ],
+        "Clone": [
+            ("clone_copy_any",      "Successfully copy any role when your chosen player dies."),
+            ("clone_survive_copy",  "Survive to Day 3 after copying a role."),
+            ("clone_copy_before3",  "Copy a role before Night 3."),
+            ("clone_never_voted",   "Never be the top vote recipient on any day."),
+        ],
+        "Shapeshifter": [
+            ("shifter_copy_wolf",   "Copy a wolf role and gain den access."),
+            ("shifter_copy_seer",   "Copy the Seer or Doctor role."),
+            ("shifter_survive_day3","Survive to Day 3 after shifting."),
+            ("shifter_before2",     "Successfully shift into a role before Night 2 ends."),
+        ],
+        "Drunk": [
+            ("drunk_survive_day3",  "Survive to Day 3 without breaking your communication rule."),
+            ("drunk_final5",        "Still be alive in the final 5 players."),
+            ("drunk_never_voted",   "Never be the top vote recipient on any day."),
+            ("drunk_outlast_half",  "Outlast at least half the starting players."),
+        ],
+        "Pothead": [
+            ("pothead_munchies",    "Be killed by wolves triggering the munchies second kill."),
+            ("pothead_survive_day3","Survive to Day 3."),
+            ("pothead_never_voted", "Never be the top vote recipient on any day."),
+            ("pothead_final5",      "Still be alive in the final 5 players."),
+        ],
+        "Flirt": [
+            ("flirt_block_wolf",    "Block a wolf's night action."),
+            ("flirt_block_twice",   "Block the same player on 2 different nights."),
+            ("flirt_survive_day3",  "Survive to Day 3."),
+            ("flirt_block_3",       "Block 3 different players across the game."),
+        ],
+        "Jafar": [
+            ("jafar_survive_day3",  "Survive to Day 3 using your random daily abilities."),
+            ("jafar_random_wolf",   "Receive a village ability that contributes to identifying a wolf."),
+            ("jafar_never_voted",   "Never be the top vote recipient on any day."),
+            ("jafar_final5",        "Still be alive in the final 5 players."),
+        ],
+        "Lycan": [
+            ("lycan_survive_turn",  "Be targeted by wolves and turn instead of dying."),
+            ("lycan_vote_correct_3","Vote for the eliminated player on 3 different days."),
+            ("lycan_survive_day3",  "Survive to Day 3."),
+            ("lycan_last_village",  "Be the last village-aligned player standing."),
+        ],
+        "Time Lord": [
+            ("timelord_survive_day3","Survive to Day 3."),
+            ("timelord_never_voted", "Never be the top vote recipient on any day."),
+            ("timelord_vote_correct","Vote for the eliminated player on 3 different days."),
+            ("timelord_final5",      "Still be alive in the final 5 players."),
+        ],
+        "Village Idiot": [
+            ("idiot_survive_day3",  "Survive to Day 3 without breaking your communication rule."),
+            ("idiot_never_voted",   "Never be the top vote recipient on any day."),
+            ("idiot_outlast_half",  "Outlast at least half the starting players."),
+            ("idiot_final5",        "Still be alive in the final 5 players."),
+        ],
+        "Village Jokester": [
+            ("jokester_kill_voter", "Be hung and successfully kill one of your voters."),
+            ("jokester_survive_day3","Survive to Day 3 without being hung."),
+            ("jokester_never_top",  "Never be the top vote recipient on any day."),
+            ("jokester_vote_correct","Vote for the eliminated player on 3 different days."),
+        ],
+        "Virgin": [
+            ("virgin_survive_day3", "Survive to Day 3 without breaking your communication rule."),
+            ("virgin_never_voted",  "Never be the top vote recipient on any day."),
+            ("virgin_final5",       "Still be alive in the final 5 players."),
+            ("virgin_last_village", "Be the last village-aligned player standing."),
+        ],
+        "Traitor": [
+            ("traitor_switch",      "Successfully switch to the wolf team."),
+            ("traitor_post_switch_kill","After switching, contribute to a den kill."),
+            ("traitor_survive_day3","Survive to Day 3 undetected."),
+            ("traitor_undetected",  "Switch sides without being voted out before the final 5."),
+        ],
+        "White Wolf": [
+            ("whitewolf_kill_wolf", "Successfully kill a wolf with your independent ability."),
+            ("whitewolf_final3",    "Survive to the final 3 alive players."),
+            ("whitewolf_3_nights",  "Use your kill ability 3 different nights without dying."),
+            ("whitewolf_survive_day3","Survive to Day 3."),
+        ],
+        "Diseased": [
+            ("diseased_trigger",    "Be killed by wolves and trigger the food poisoning effect."),
+            ("diseased_survive_day3","Survive to Day 3."),
+            ("diseased_never_voted","Never be the top vote recipient on any day."),
+            ("diseased_final5",     "Still be alive in the final 5 players."),
+        ],
+        "Bloodhound": [
+            ("bh_scan_4",           "Scan 4 different players in one game."),
+            ("bh_find_seer",        "Identify the Seer before Day 2."),
+            ("bh_find_sheriff",     "Identify the Sheriff before Day 2."),
+            ("bh_scan_killed",      "Scan a player the same night the den kills them."),
+        ],
+        "Wolf Pup": [
+            ("pup_block_3",         "Block 3 different players across one game."),
+            ("pup_survive_final5",  "Survive until the final 5 alive players."),
+            ("pup_block_night_kill","Block a player on the same night the den kills."),
+            ("pup_block_consecutive","Block 2 different players on 2 consecutive nights."),
+        ],
+        "Witch": [
+            ("witch_both_potions",  "Use both your potions before Night 3."),
+            ("witch_save_attacked", "Use your healing potion on a player the wolves targeted."),
+            ("witch_kill_wolf",     "Use your poison potion to kill a wolf."),
+            ("witch_survive_day3",  "Survive to Day 3."),
+        ],
+        "Oracle": [
+            ("oracle_3_nights",     "Use your crystal ball 3 nights in a row."),
+            ("oracle_survive_day3", "Survive to Day 3."),
+            ("oracle_correct_3",    "Receive 3 correct answers that contribute to wolf eliminations."),
+            ("oracle_never_voted",  "Never be the top vote recipient on any day."),
+        ],
+        "Warlock": [
+            ("warlock_grant_wish",  "Successfully grant a wish and eliminate a player in the process."),
+            ("warlock_survive_day3","Survive to Day 3."),
+            ("warlock_never_voted", "Never be the top vote recipient on any day."),
+            ("warlock_final5",      "Still be alive in the final 5 players."),
+        ],
+        "Fairy Elf": [
+            ("elf_revive",          "Successfully bring back a dead player using your ability."),
+            ("elf_survive_day3",    "Survive to Day 3."),
+            ("elf_never_voted",     "Never be the top vote recipient on any day."),
+            ("elf_final5",          "Still be alive in the final 5 players."),
+        ],
+        "Wraith": [
+            ("wraith_fire_command", "Successfully fire the Kill Command."),
+            ("wraith_mark_3",       "Mark 3 different players before firing."),
+            ("wraith_fire_early",   "Fire the Kill Command before Night 4."),
+            ("wraith_survive_day3", "Survive to Day 3."),
+        ],
+        "Chaos Gremlin": [
+            ("cg_survive_final3",   "Survive to the final 3 alive players."),
+            ("cg_vote_eliminates",  "The player you were told to vote for gets eliminated that same day."),
+            ("cg_spin_wolf",        "Spin a wolf role ability at night and successfully use it."),
+            ("cg_survive_day4",     "Survive to Day 4 without being eliminated."),
+        ],
+    }
+
+    # Shadow Wolf special post-death quest
+    SHADOW_WOLF_EXTRA = (
+        "shadow_postdeath_kill",
+        "After being voted out, successfully kill a player who voted against you."
+    )
+
+    for r in alive:
+        pid       = r[0]
+        role_name = r[1]
+        team      = get_team(guild_id, role_name)
+
         quests = []
 
-        db_set_bounty(guild_id, pid, "never_change_vote")
-        quests.append("**Quest 1:** Never change your vote all game.")
+        if team == "wolf" and role_name in DEN_WOLVES:
+            # Den wolves get 3 random den quests
+            pool   = list(DEN_QUESTS)
+            chosen = _rand.sample(pool, min(3, len(pool)))
+            quests = chosen
+            # Shadow Wolf always gets their post-death quest as a 4th bonus
+            if role_name == "Shadow Wolf":
+                quests.append(SHADOW_WOLF_EXTRA)
 
-        others = [v for v in villagers if v[0] != pid]
-        if others:
-            target_row = _rand.choice(others)
-            target_m   = guild.get_member(target_row[0])
-            target_nm  = target_m.display_name if target_m else str(target_row[0])
-            db_set_bounty(guild_id, pid, "keep_alive_day3", target_id=target_row[0])
-            quests.append(f"**Quest 2:** Keep **{target_nm}** alive until Day 3.")
+        elif role_name == "Bloodhound":
+            pool   = ROLE_QUESTS.get("Bloodhound", [])
+            quests = _rand.sample(pool, min(3, len(pool)))
+
+        elif role_name == "Wolf Pup":
+            pool   = ROLE_QUESTS.get("Wolf Pup", [])
+            quests = _rand.sample(pool, min(3, len(pool)))
+
+        elif role_name == "Chaos Gremlin":
+            # Chaos Gremlin gets all 3 from its own unique pool
+            pool   = ROLE_QUESTS.get("Chaos Gremlin", [])
+            quests = _rand.sample(pool, min(3, len(pool)))
+
+        else:
+            # Village / neutral — 1 role-specific + 2 generic
+            role_pool    = ROLE_QUESTS.get(role_name, [])
+            generic_pool = list(GENERIC_VILLAGE)
+            role_pick    = _rand.sample(role_pool, min(1, len(role_pool)))
+            generic_pick = _rand.sample(generic_pool, min(2, len(generic_pool)))
+            quests       = role_pick + generic_pick
+            _rand.shuffle(quests)
+
+        # Save to DB and send to private channel
+        for quest_type, quest_desc in quests:
+            db_set_bounty(guild_id, pid, quest_type)
 
         priv_ch = guild.get_channel(r[3]) if len(r) > 3 and r[3] else None
         if not priv_ch:
@@ -5580,20 +5940,33 @@ async def _assign_bounties(guild, guild_id: int):
                 priv_ch = await guild.fetch_channel(r[3]) if len(r) > 3 and r[3] else None
             except Exception:
                 pass
+
         if priv_ch:
+            # Theme-aware title
+            if disney:
+                title = "🎯 Your Kingdom Quests"
+                footer = "Complete any quest to earn a bonus token for the next game."
+            elif hp:
+                title = "🎯 Your Hogwarts Assignments"
+                footer = "Complete any assignment to earn a bonus token for the next game."
+            else:
+                title = "🎯 Your Quests"
+                footer = "Complete any quest to earn a bonus token for the next game."
+
+            lines = []
+            for i, (qt, qd) in enumerate(quests, 1):
+                lines.append(f"**Quest {i}:** {qd}")
+
             embed = discord.Embed(
-                title       = "🎯 Your Quests",
-                description = (
-                    "\n".join(quests) +
-                    "\n\n*Complete quests to earn bonus tokens for the next game.*\n"
-                    "*Use `/my_bounties` to check your progress.*"
-                ),
-                color = 0x27AE60
+                title       = title,
+                description = "\n\n".join(lines) +
+                              f"\n\n*{footer}*\n*Use `/my_bounties` to check your progress.*",
+                color       = 0xF39C12 if team == "village" else 0xC0392B if team == "wolf" else 0x8B0000
             )
             try:
                 await priv_ch.send(embed=embed)
             except Exception as e:
-                print(f"[bounty] villager send failed for {pid}: {e}")
+                print(f"[bounty] send failed for {pid}: {e}")
 
 
 async def _check_bounty_completion(guild, guild_id: int):
@@ -5836,28 +6209,40 @@ async def my_bounties_cmd(interaction: discord.Interaction):
 @tree.command(name="rate_players", description="Rate players after a game ends — Best Liar and Most Helpful")
 async def rate_players_cmd(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
-    rows = db_get_assignments(interaction.guild_id)
-    if not rows:
-        return await interaction.followup.send("No players to rate.", ephemeral=True)
+    try:
+        # Works during game or after — try assignments first, fall back to guild members
+        rows   = db_get_assignments(interaction.guild_id)
+        others = [r for r in rows if r[0] != interaction.user.id] if rows else []
 
-    others = [r for r in rows if r[0] != interaction.user.id]
-    if not others:
-        return await interaction.followup.send("No other players to rate.", ephemeral=True)
+        # If no assignments (post-game cleanup) get all non-bot members as fallback
+        if not others:
+            all_members = [m for m in interaction.guild.members
+                           if not m.bot and m.id != interaction.user.id]
+            if not all_members:
+                return await interaction.followup.send("No players to rate.", ephemeral=True)
+            others = [(m.id, "", 1, 0) for m in all_members[:25]]
 
-    # Use game_num from stats if available
-    game_num = db_get_game_count(interaction.guild_id)
-    view = ReputationVoteView(interaction.guild_id, interaction.user.id, others, game_num)
-    embed = discord.Embed(
-        title       = "⭐ Rate Your Fellow Players",
-        description = (
-            "Vote for:\n"
-            "**🤥 Best Liar** — who fooled you the most?\n"
-            "**🤝 Most Helpful** — who helped the village the most?\n\n"
-            "*You cannot vote for yourself. Votes are tracked across all games.*"
-        ),
-        color = 0xF39C12
-    )
-    await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        if not others:
+            return await interaction.followup.send("No other players to rate.", ephemeral=True)
+
+        game_num = db_get_game_count(interaction.guild_id)
+        view     = ReputationVoteView(interaction.guild_id, interaction.user.id,
+                                       others, game_num, interaction.guild)
+        embed = discord.Embed(
+            title       = "⭐ Rate Your Fellow Players",
+            description = (
+                "Vote for:\n"
+                "**🤥 Best Liar** — who fooled you the most?\n"
+                "**🤝 Most Helpful** — who helped the village the most?\n\n"
+                "*You cannot vote for yourself. Votes are tracked across all games.*"
+            ),
+            color = 0xF39C12
+        )
+        await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        await interaction.followup.send(f"❌ Rate players error: {e}", ephemeral=True)
 
 
 @tree.command(name="reputation", description="See a player's reputation across all games")
@@ -6007,17 +6392,23 @@ async def spectator_leaderboard_cmd(interaction: discord.Interaction):
 
 
 class ReputationVoteView(View):
-    def __init__(self, guild_id, voter_id, players, game_num):
+    def __init__(self, guild_id, voter_id, players, game_num, guild=None):
         super().__init__(timeout=300)
         self.guild_id  = guild_id
         self.voter_id  = voter_id
         self.game_num  = game_num
-        self.liar_voted    = False
-        self.helpful_voted = False
+        self.guild     = guild
+
+        def get_name(pid):
+            if guild:
+                m = guild.get_member(pid)
+                if m:
+                    return m.display_name[:80]
+            return str(pid)
 
         # Best Liar dropdown
         liar_opts = [discord.SelectOption(
-            label=f"🤥 {self._name(p[0])}",
+            label=f"🤥 {get_name(p[0])}",
             value=f"liar_{p[0]}") for p in players[:25]]
         liar_sel = Select(placeholder="🤥 Best Liar — who fooled you most?",
                           options=liar_opts,
@@ -6027,7 +6418,7 @@ class ReputationVoteView(View):
 
         # Most Helpful dropdown
         helpful_opts = [discord.SelectOption(
-            label=f"🤝 {self._name(p[0])}",
+            label=f"🤝 {get_name(p[0])}",
             value=f"helpful_{p[0]}") for p in players[:25]]
         helpful_sel = Select(placeholder="🤝 Most Helpful — who helped most?",
                              options=helpful_opts,
@@ -6035,16 +6426,14 @@ class ReputationVoteView(View):
         helpful_sel.callback = self.on_helpful
         self.add_item(helpful_sel)
 
-    def _name(self, pid):
-        return str(pid)  # Will show ID — actual name resolved at callback time
-
     async def on_liar(self, interaction: discord.Interaction):
         val    = interaction.data["values"][0]
         pid    = int(val.split("_")[1])
         target = interaction.guild.get_member(pid)
         tname  = target.display_name if target else str(pid)
         if db_already_voted_reputation(self.guild_id, self.voter_id, self.game_num, "best_liar"):
-            return await interaction.response.send_message("❌ Already voted for Best Liar.", ephemeral=True)
+            return await interaction.response.send_message(
+                "❌ Already voted for Best Liar this game.", ephemeral=True)
         db_add_reputation_vote(self.guild_id, self.voter_id, pid, "best_liar", self.game_num)
         await interaction.response.send_message(
             f"✅ Voted **{tname}** for 🤥 Best Liar!", ephemeral=True)
@@ -6055,7 +6444,8 @@ class ReputationVoteView(View):
         target = interaction.guild.get_member(pid)
         tname  = target.display_name if target else str(pid)
         if db_already_voted_reputation(self.guild_id, self.voter_id, self.game_num, "most_helpful"):
-            return await interaction.response.send_message("❌ Already voted for Most Helpful.", ephemeral=True)
+            return await interaction.response.send_message(
+                "❌ Already voted for Most Helpful this game.", ephemeral=True)
         db_add_reputation_vote(self.guild_id, self.voter_id, pid, "most_helpful", self.game_num)
         await interaction.response.send_message(
             f"✅ Voted **{tname}** for 🤝 Most Helpful!", ephemeral=True)
@@ -7382,10 +7772,10 @@ DISNEY_ROLE_MAP = {
     "Witch":           ("Madam Mim",          "neutral"),
     "Oracle":          ("Blue Fairy",         "neutral"),
     "Warlock":         ("Yen Sid",            "neutral"),
-    "Fairy Elf":       ("Tinker Bell",        "neutral"),
+    "Fairy Elf":       ("Pegasus",            "neutral"),
     "Wraith":          ("Headless Horseman",  "neutral"),
     "Diseased":        ("Tarzan",             "village"),
-    "Flirt":           ("Megara",             "village"),
+    "Chaos Gremlin":   ("Stitch",             "neutral"),
 }
 
 # Disney channel name overrides
@@ -7481,6 +7871,12 @@ TOKENS = {
     "gamble":       {"emoji": "🎰",  "name": "Gamble Token",         "desc": "Flip a coin. Heads: you learn one wolf's name. Tails: one wolf learns your role."},
     "mirror":       {"emoji": "🪞",  "name": "Mirror Token",         "desc": "If you are wolf-killed tonight, the kill bounces back and eliminates the wolf who chose you."},
     "wild":         {"emoji": "🃏",  "name": "Wild Token",           "desc": "Mystery box — you pick any token from the full list after opening it."},
+    # Wolf-friendly tokens
+    "frame":        {"emoji": "🖼️",  "name": "Frame Token",          "desc": "Make one player appear as wolf-aligned to any investigation or Seer check for one night. Mod applies it — village never sees the token was used."},
+    "vanish":       {"emoji": "👻",  "name": "Vanish Token",         "desc": "Your night action leaves no trace tonight. Insomniac, Shadow Token, and any tracking abilities cannot detect you. Useful for den wolves acting without a paper trail."},
+    "redirect":     {"emoji": "↩️",  "name": "Redirect Token",       "desc": "Secretly redirect one player's night action to a different target of your choosing. Their ability fires but hits someone else. They never know it was moved."},
+    "alibi":        {"emoji": "📋",  "name": "Alibi Token",          "desc": "Pick one player as your decoy. Any investigation targeting you tonight — Seer, Medium, or Bloodhound — is silently redirected to them instead. You never appear in any result. Clears at dawn."},
+    "bloodscent":   {"emoji": "🩸",  "name": "Bloodscent Token",     "desc": "Learn which player the Seer, Medium, or Bloodhound investigated last night. Delivered privately at dawn. Know who knows what before they act on it."},
 }
 
 # Challenge prompts by category
@@ -7595,11 +7991,20 @@ def db_clear_tokens(guild_id):
 def db_add_reputation_vote(guild_id, voter_id, target_id, category, game_num):
     conn = sqlite3.connect(DB_FILE)
     c    = conn.cursor()
+    # Ensure tables exist
+    c.execute('''CREATE TABLE IF NOT EXISTS reputation (
+                    guild_id INTEGER, voter_id INTEGER, target_id INTEGER,
+                    category TEXT, game_num INTEGER,
+                    PRIMARY KEY (guild_id, voter_id, target_id, category, game_num))''')
+    c.execute('''CREATE TABLE IF NOT EXISTS reputation_totals (
+                    guild_id INTEGER, player_id INTEGER,
+                    best_liar INTEGER DEFAULT 0, most_helpful INTEGER DEFAULT 0,
+                    PRIMARY KEY (guild_id, player_id))''')
     c.execute("INSERT OR REPLACE INTO reputation VALUES (?,?,?,?,?)",
               (guild_id, voter_id, target_id, category, game_num))
-    c.execute(f"INSERT INTO reputation_totals (guild_id, player_id, best_liar, most_helpful) "
-              f"VALUES (?,?,0,0) ON CONFLICT(guild_id,player_id) DO NOTHING",
-              (guild_id, target_id))
+    # Use INSERT OR IGNORE instead of ON CONFLICT DO NOTHING for compatibility
+    c.execute("INSERT OR IGNORE INTO reputation_totals (guild_id, player_id, best_liar, most_helpful) "
+              "VALUES (?,?,0,0)", (guild_id, target_id))
     if category == "best_liar":
         c.execute("UPDATE reputation_totals SET best_liar=best_liar+1 WHERE guild_id=? AND player_id=?",
                   (guild_id, target_id))
@@ -7630,6 +8035,10 @@ def db_get_reputation_leaderboard(guild_id):
 def db_already_voted_reputation(guild_id, voter_id, game_num, category):
     conn = sqlite3.connect(DB_FILE)
     c    = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS reputation (
+                    guild_id INTEGER, voter_id INTEGER, target_id INTEGER,
+                    category TEXT, game_num INTEGER,
+                    PRIMARY KEY (guild_id, voter_id, target_id, category, game_num))''')
     c.execute("SELECT COUNT(*) FROM reputation WHERE guild_id=? AND voter_id=? AND game_num=? AND category=?",
               (guild_id, voter_id, game_num, category))
     count = c.fetchone()[0]
@@ -7712,8 +8121,10 @@ def db_get_spectator_points(guild_id, player_id):
 def db_add_spectator_points(guild_id, player_id, amount):
     conn = sqlite3.connect(DB_FILE)
     c    = conn.cursor()
-    c.execute("INSERT INTO spectator_points VALUES (?,?,?) ON CONFLICT(guild_id,player_id) "
-              "DO UPDATE SET points=points+?", (guild_id, player_id, 100, amount))
+    c.execute("INSERT OR IGNORE INTO spectator_points VALUES (?,?,?)",
+              (guild_id, player_id, 100))
+    c.execute("UPDATE spectator_points SET points=points+? WHERE guild_id=? AND player_id=?",
+              (amount, guild_id, player_id))
     conn.commit()
     conn.close()
 
@@ -7769,6 +8180,7 @@ def get_theme_labels(guild_id: int) -> dict:
     state   = cached_get_state(guild_id) or {}
     disney  = bool(state.get("disney_mode", 0))
     hp      = bool(state.get("hp_mode", 0))
+    greek   = bool(state.get("greek_mode", 0))
     if disney:
         return {
             "village":      "Heroes",
@@ -7790,6 +8202,17 @@ def get_theme_labels(guild_id: int) -> dict:
             "wolf_icon":    "🐍",
             "neutral_icon": "🌙",
             "den_name":     "Chamber of Secrets",
+        }
+    elif greek:
+        return {
+            "village":      "Olympians",
+            "wolf":         "Titans",
+            "neutral":      "Fates",
+            "setting":      "Mount Olympus",
+            "village_icon": "🏛️",
+            "wolf_icon":    "⚡",
+            "neutral_icon": "🌙",
+            "den_name":     "Titan Throne",
         }
     else:
         return {
@@ -7842,7 +8265,7 @@ HP_ROLE_MAP = {
     "Hermit":            ("Hagrid",                "village"),
     "Cupid":             ("Lavender Brown",        "village"),
     "Gravedigger":       ("Peeves",                "village"),
-    "Clone":             ("Polyjuice Potion",      "village"),
+    "Clone":             ("Mad-Eye Moody",         "village"),
     "Shapeshifter":      ("Nymphadora Tonks",      "village"),
     "Drunk":             ("Seamus Finnigan",       "village"),
     "Pothead":           ("Neville Longbottom",    "village"),
@@ -7856,13 +8279,13 @@ HP_ROLE_MAP = {
     "Traitor":           ("Severus Snape",         "village"),
     "White Wolf":        ("Sirius Black",          "village"),
     # Unaligned (Neutral)
-    "Witch":     ("Sybill Trelawney",  "neutral"),
+    "Witch":     ("Bathilda Bagshot",   "neutral"),
     "Oracle":    ("The Sorting Hat",   "neutral"),
     "Warlock":   ("Gilderoy Lockhart", "neutral"),
     "Fairy Elf": ("Dobby (Free Elf)",  "neutral"),
     "Wraith":    ("Dementors",         "neutral"),
     "Diseased":  ("Argus Filch",       "village"),
-    "Flirt":     ("Madam Rosmerta",    "village"),
+    "Chaos Gremlin":   ("Peeves",             "neutral"),
 }
 
 HP_CHANNEL_NAMES = {
@@ -7896,6 +8319,94 @@ def is_hp_mode(guild_id: int) -> bool:
     """Check if this guild's current game is running in Harry Potter theme."""
     state = cached_get_state(guild_id) or {}
     return bool(state.get("hp_mode", 0))
+
+
+# ====================== GREEK GODS THEME ======================
+
+GREEK_ROLE_MAP = {
+    # Titans (Wolves)
+    "Wolf":         ("Titan Soldier",    "wolf"),
+    "Alpha":        ("Kronos",           "wolf"),
+    "Elite Alpha":  ("Typhon",           "wolf"),
+    "Blessed Wolf": ("Ares",             "wolf"),
+    "Bloodhound":   ("Argus Panoptes",   "wolf"),
+    "Bloodletter":  ("Medusa",           "wolf"),
+    "Crazed Wolf":  ("Dionysus",         "wolf"),
+    "Dire Wolf":    ("Antaeus",          "wolf"),
+    "Echo-Stalker": ("Echo",             "wolf"),
+    "Shadow Wolf":  ("Thanatos",         "wolf"),
+    "Werekitten":   ("Circe",            "wolf"),
+    "Wolf Pup":     ("Dolus",            "wolf"),
+    # Olympians (Village)
+    "Villager":          ("Athenian Citizen",  "village"),
+    "Seer":              ("Tiresias",          "village"),
+    "Doctor":            ("Apollo",            "village"),
+    "Surgeon":           ("Asclepius",         "village"),
+    "Huntsman":          ("Artemis",           "village"),
+    "Sheriff":           ("Athena",            "village"),
+    "Medium":            ("Hermes",            "village"),
+    "Mayor":             ("Zeus",              "village"),
+    "Governor":          ("Poseidon",          "village"),
+    "Elder":             ("Prometheus",        "village"),
+    "Insomniac":         ("Selene",            "village"),
+    "Agitator":          ("Eris",              "village"),
+    "Hermit":            ("Hephaestus",        "village"),
+    "Cupid":             ("Aphrodite",         "village"),
+    "Gravedigger":       ("Charon",            "village"),
+    "Clone":             ("Proteus",           "village"),
+    "Shapeshifter":      ("Nemesis",           "village"),
+    "Drunk":             ("Silenus",           "village"),
+    "Pothead":           ("Pan",               "village"),
+    "Flirt":             ("Eros",              "village"),
+    "Jafar":             ("Lachesis",          "village"),
+    "Lycan":             ("Lycaon",            "village"),
+    "Time Lord":         ("Chronos",           "village"),
+    "Village Idiot":     ("Momus",             "village"),
+    "Village Jokester":  ("Comus",             "village"),
+    "Virgin":            ("Hestia",            "village"),
+    "Traitor":           ("Ixion",             "village"),
+    "White Wolf":        ("Odysseus",          "village"),
+    "Diseased":          ("Philoctetes",       "village"),
+    # Fates (Neutral)
+    "Witch":     ("Hecate",       "neutral"),
+    "Oracle":    ("Pythia",       "neutral"),
+    "Warlock":   ("Daedalus",     "neutral"),
+    "Fairy Elf": ("Nymph",        "neutral"),
+    "Wraith":    ("The Erinyes",  "neutral"),
+    "Chaos Gremlin": ("Ate",     "neutral"),
+}
+
+GREEK_CHANNEL_NAMES = {
+    "mod-log":      "chamber-of-fates",
+    "player-list":  "pantheon-roster",
+    "role-list":    "divine-roles",
+    "night-order":  "decree-of-night",
+    "day-vote":     "trial-of-olympus",
+    "timeline":     "chronicle-of-ages",
+    "stats":        "hall-of-heroes",
+    "blood-board":  "the-oracle",
+    "wolf-den":     "titan-throne",
+    "ghost-chat":   "underworld",
+    "wraith-den":   "erinyes-lair",
+    "win-tracker":  "titan-olympian-war",
+    "village-chat": "mount-olympus",
+    "spectator-qa": "mortal-realm",
+}
+
+GREEK_TEAMS = {
+    "wolf":    "Titans",
+    "village": "Olympians",
+    "neutral": "Fates",
+}
+
+def get_greek_role(role_name: str) -> tuple:
+    """Return (greek_name, team) for a role, or original name if not mapped."""
+    return GREEK_ROLE_MAP.get(role_name, (role_name, None))
+
+def is_greek_mode(guild_id: int) -> bool:
+    """Check if this guild's current game is running in Greek Gods theme."""
+    state = cached_get_state(guild_id) or {}
+    return bool(state.get("greek_mode", 0))
 
 
 
@@ -8788,6 +9299,10 @@ class DayVoteClosedPromptView(View):
 async def _run_start_night(guild, guild_id, night_num, duration, state):
     """Core night start logic — shared by start_night command, prompts, and next_phase."""
     mins = duration // 60
+
+    # Clear frenzy state from previous day — frenzy only applies to one day
+    db_set_state(guild_id, agitator_frenzy_day=None, agitator_elim_count=0)
+    invalidate_cache(guild_id)
     rows          = db_get_assignments(guild_id)
     # Build alive_players including NPCs as proxy objects
     class _NPCProxy:
@@ -8879,9 +9394,19 @@ async def _run_start_night(guild, guild_id, night_num, duration, state):
                 "Shadow Wolf":"Choose a voter to kill (post-death ability).",
                 "Werekitten":"Choose your kill target tonight. Your cuteness bypasses the Sheriff and Huntsman protection — but Doctor and Surgeon saves still apply. The den can use your ability a maximum of 2 times per game.",
                 "White Wolf":"Choose an independent kill, or skip.",
+                "Chaos Gremlin": f"🎰 The wheel has spun — your ability tonight is shown on the button below.",
             }
             desc = role_descs.get(role_name, "Submit your night action below.")
-            await ch.send(fmt(f"🌙 Night {night_num} — time to act!\n\n{desc}"), view=night_view)
+            # Chaos Gremlin gets a special intro message showing their spun role
+            if role_name == "Chaos Gremlin" and isinstance(night_view, ChaosGremlinNightView):
+                spun = night_view.spun_role or "Nothing"
+                await ch.send(fmt(
+                    f"🎰 **Night {night_num} — Chaos Gremlin**\n\n"
+                    f"The wheel has spun. Tonight you are playing as: **{spun}**\n"
+                    f"Use the button below to activate the ability, or pass."),
+                    view=night_view)
+            else:
+                await ch.send(fmt(f"🌙 Night {night_num} — time to act!\n\n{desc}"), view=night_view)
             status_view = NightStatusView(guild_id, pid, role_name, night_num)
             await ch.send(fmt("Let the mod know your intent for tonight:"), view=status_view)
         elif role_name in NIGHT_NO_BUTTON_ROLES:
@@ -9245,17 +9770,6 @@ SPEECH_RULES = {
         "check":   lambda text: _has_real_words(text),
         "warning": "🍺 **Drunk warning** — you can only send memes, gifs, and emojis. No text allowed.",
         "final":   "🍺 **Final warning** — one more text message and the mods will be notified for elimination.",
-    },
-    "Flirt": {
-        "rule":    "can only communicate via sexual innuendo, gifs, emojis, or suggestive words",
-        "check":   lambda text: _has_real_words(text) and not any(
-            w in text.lower() for w in [
-                "babe","honey","darling","sugar","sweet","hot","naughty","wink",
-                "kiss","oh my","goodness","tempt","desire","tease","seduce",
-                "lusty","steamy","spicy","flirt","gorgeous","delicious"
-            ]),
-        "warning": "💋 **Flirt warning** — you must speak only in innuendo and suggestive language.",
-        "final":   "💋 **Final warning** — one more clean message and the mods will be notified for elimination.",
     },
     "Village Idiot": {
         "rule":    "can only speak in typos and gibberish — no proper words",
@@ -10109,7 +10623,7 @@ class ReplayWarningView(View):
 
 def build_role_card(player: discord.Member, role_name: str, role_info: dict,
                     font_style: str = "default", disney: bool = False,
-                    hp: bool = False) -> discord.Embed:
+                    hp: bool = False, greek: bool = False) -> discord.Embed:
     """Build the rich private role-reveal embed sent to each player at game start."""
     team = role_info.get("team", "village")
 
@@ -10120,6 +10634,9 @@ def build_role_card(player: discord.Member, role_name: str, role_info: dict,
     elif hp:
         themed_name, _ = get_hp_role(role_name)
         teams = HP_TEAMS
+    elif greek:
+        themed_name, _ = get_greek_role(role_name)
+        teams = GREEK_TEAMS
     else:
         themed_name = None
         teams = {"wolf": "🐺 WOLF PACK", "village": "🏘️ VILLAGE", "neutral": "⚖️ NEUTRAL"}
@@ -10147,6 +10664,16 @@ def build_role_card(player: discord.Member, role_name: str, role_info: dict,
                 "\u001b[0m```"
             )
             flavor = "*The Dark Mark is upon you. Serve well, and Voldemort will reward your loyalty.*"
+        elif greek:
+            team_label  = f"⚡ {GREEK_TEAMS['wolf'].upper()}"
+            team_banner = (
+                "```ansi\n"
+                "\u001b[2;31m╔══════════════════════════════╗\n"
+                "║     YOU ARE A TITAN          ║\n"
+                "╚══════════════════════════════╝\n"
+                "\u001b[0m```"
+            )
+            flavor = "*The age of Olympus ends. Kronos rises. Bring the mountain down.*"
         else:
             team_label  = "🐺 WOLF PACK"
             team_banner = (
@@ -10179,6 +10706,16 @@ def build_role_card(player: discord.Member, role_name: str, role_info: dict,
                 "\u001b[0m```"
             )
             flavor = "*You answer to neither the Order nor the Dark Lord. Your fate is your own.*"
+        elif greek:
+            team_label  = f"🌙 {GREEK_TEAMS['neutral'].upper()}"
+            team_banner = (
+                "```ansi\n"
+                "\u001b[2;33m╔══════════════════════════════╗\n"
+                "║     YOU ARE THE FATES        ║\n"
+                "╚══════════════════════════════╝\n"
+                "\u001b[0m```"
+            )
+            flavor = "*You weave the threads of destiny. Neither Titan nor Olympian — only purpose.*"
         else:
             team_label  = "⚖️ NEUTRAL"
             team_banner = (
@@ -10211,6 +10748,16 @@ def build_role_card(player: discord.Member, role_name: str, role_info: dict,
                 "\u001b[0m```"
             )
             flavor = "*The wizarding world is counting on you. Root out the Death Eaters before it is too late.*"
+        elif greek:
+            team_label  = f"🏛️ {GREEK_TEAMS['village'].upper()}"
+            team_banner = (
+                "```ansi\n"
+                "\u001b[2;32m╔══════════════════════════════╗\n"
+                "║     YOU ARE AN OLYMPIAN      ║\n"
+                "╚══════════════════════════════╝\n"
+                "\u001b[0m```"
+            )
+            flavor = "*Olympus stands or falls with you. Find the Titans before the age of gods ends.*"
         else:
             team_label  = "🏘️ VILLAGE"
             team_banner = (
@@ -10224,7 +10771,7 @@ def build_role_card(player: discord.Member, role_name: str, role_info: dict,
 
     if themed_name:
         styled_name = apply_font(themed_name.upper(), font_style)
-        icon = "🏰" if disney else "⚡"
+        icon = "🏰" if disney else "🏛️" if greek else "⚡"
         title = f"{icon}  {styled_name}"
     else:
         styled_name = apply_font(role_name.upper(), font_style)
@@ -10337,22 +10884,25 @@ class ChaosModeView(View):
         normal_btn  = Button(label="🎮 Normal Game",                        style=discord.ButtonStyle.green,     row=0)
         disney_btn  = Button(label="🏰 Disney Theme",                        style=discord.ButtonStyle.primary,   row=0)
         hp_btn      = Button(label="⚡ Harry Potter Theme",                   style=discord.ButtonStyle.primary,   row=0)
-        role_btn    = Button(label="🎭 Partial Chaos — Hidden Roster",        style=discord.ButtonStyle.secondary, row=1)
-        count_btn   = Button(label="👥 Hidden Count — Unknown Players",       style=discord.ButtonStyle.secondary, row=1)
-        full_btn    = Button(label="🌪️ Full Chaos — Roster + Count Hidden",   style=discord.ButtonStyle.danger,    row=2)
-        cancel_btn  = Button(label="Cancel",                                   style=discord.ButtonStyle.secondary, row=2)
+        greek_btn   = Button(label="🏛️ Greek Gods Theme",                    style=discord.ButtonStyle.primary,   row=1)
+        role_btn    = Button(label="🎭 Partial Chaos — Hidden Roster",        style=discord.ButtonStyle.secondary, row=2)
+        count_btn   = Button(label="👥 Hidden Count — Unknown Players",       style=discord.ButtonStyle.secondary, row=2)
+        full_btn    = Button(label="🌪️ Full Chaos — Roster + Count Hidden",   style=discord.ButtonStyle.danger,    row=3)
+        cancel_btn  = Button(label="Cancel",                                   style=discord.ButtonStyle.secondary, row=3)
 
-        normal_btn.callback  = lambda i: self._launch(i, hide_roles=False, hide_count=False, disney=False, hp=False)
-        disney_btn.callback  = lambda i: self._launch(i, hide_roles=False, hide_count=False, disney=True,  hp=False)
-        hp_btn.callback      = lambda i: self._launch(i, hide_roles=False, hide_count=False, disney=False, hp=True)
-        role_btn.callback    = lambda i: self._launch(i, hide_roles=True,  hide_count=False, disney=False, hp=False)
-        count_btn.callback   = lambda i: self._launch(i, hide_roles=False, hide_count=True,  disney=False, hp=False)
-        full_btn.callback    = lambda i: self._launch(i, hide_roles=True,  hide_count=True,  disney=False, hp=False)
+        normal_btn.callback  = lambda i: self._launch(i, hide_roles=False, hide_count=False, disney=False, hp=False, greek=False)
+        disney_btn.callback  = lambda i: self._launch(i, hide_roles=False, hide_count=False, disney=True,  hp=False, greek=False)
+        hp_btn.callback      = lambda i: self._launch(i, hide_roles=False, hide_count=False, disney=False, hp=True,  greek=False)
+        greek_btn.callback   = lambda i: self._launch(i, hide_roles=False, hide_count=False, disney=False, hp=False, greek=True)
+        role_btn.callback    = lambda i: self._launch(i, hide_roles=True,  hide_count=False, disney=False, hp=False, greek=False)
+        count_btn.callback   = lambda i: self._launch(i, hide_roles=False, hide_count=True,  disney=False, hp=False, greek=False)
+        full_btn.callback    = lambda i: self._launch(i, hide_roles=True,  hide_count=True,  disney=False, hp=False, greek=False)
         cancel_btn.callback  = self.on_cancel
 
         self.add_item(normal_btn)
         self.add_item(disney_btn)
         self.add_item(hp_btn)
+        self.add_item(greek_btn)
         self.add_item(role_btn)
         self.add_item(count_btn)
         self.add_item(full_btn)
@@ -10363,7 +10913,8 @@ class ChaosModeView(View):
         self.stop()
 
     async def _launch(self, interaction: discord.Interaction,
-                      hide_roles: bool, hide_count: bool, disney: bool = False, hp: bool = False):
+                      hide_roles: bool, hide_count: bool,
+                      disney: bool = False, hp: bool = False, greek: bool = False):
         try:
             await interaction.response.defer(ephemeral=True)
         except Exception:
@@ -10371,7 +10922,7 @@ class ChaosModeView(View):
         try:
             view = ConfirmStartView(self.guild_id, self.final_counts, self.all_roles,
                                     self.npc_count, hide_roles=hide_roles,
-                                    hide_count=hide_count, disney=disney, hp=hp)
+                                    hide_count=hide_count, disney=disney, hp=hp, greek=greek)
             await view.launch_game(interaction)
         except Exception as e:
             import traceback
@@ -10385,7 +10936,7 @@ class ChaosModeView(View):
 
 class ConfirmStartView(View):
     def __init__(self, guild_id, final_counts, all_roles, npc_count=0,
-                 hide_roles=False, hide_count=False, disney=False, hp=False):
+                 hide_roles=False, hide_count=False, disney=False, hp=False, greek=False):
         super().__init__(timeout=300)
         self.guild_id     = guild_id
         self.final_counts = final_counts
@@ -10395,6 +10946,7 @@ class ConfirmStartView(View):
         self.hide_count   = hide_count
         self.disney       = disney
         self.hp           = hp
+        self.greek        = greek
         start_btn  = Button(label="🚀 Start Game", style=discord.ButtonStyle.green)
         cancel_btn = Button(label="Cancel",         style=discord.ButtonStyle.danger)
         start_btn.callback  = self.on_start
@@ -10425,6 +10977,7 @@ class ConfirmStartView(View):
         hide_count = getattr(self, 'hide_count', False)
         disney     = getattr(self, 'disney', False)
         hp         = getattr(self, 'hp', False)
+        greek      = getattr(self, 'greek', False)
         state     = cached_get_state(interaction.guild_id)
         p_role_id = state.get("participant_role_id")
         p_role    = interaction.guild.get_role(p_role_id) if p_role_id else None
@@ -10520,7 +11073,7 @@ class ConfirmStartView(View):
             if mod_role:
                 mod_log_ow[mod_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
             if spec_role: mod_log_ow[spec_role] = read_ow
-            mod_log_ch = await category.create_text_channel(ch_name_themed("mod-log",     font, "📋", disney=disney, hp=hp), overwrites=mod_log_ow)
+            mod_log_ch = await category.create_text_channel(ch_name_themed("mod-log",     font, "📋", disney=disney, hp=hp, greek=greek), overwrites=mod_log_ow)
         except discord.errors.Forbidden:
             await category.delete()
             return await interaction.followup.send(
@@ -10534,19 +11087,19 @@ class ConfirmStartView(View):
         player_list_ow = {everyone: read_ow, bot_me: bot_ow}
         if mod_role:  player_list_ow[mod_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
         if spec_role: player_list_ow[spec_role] = read_ow
-        player_list_ch = await category.create_text_channel(ch_name_themed("player-list",  font, "📋", disney=disney, hp=hp), overwrites=player_list_ow)
+        player_list_ch = await category.create_text_channel(ch_name_themed("player-list",  font, "📋", disney=disney, hp=hp, greek=greek), overwrites=player_list_ow)
 
         # role-list
         role_list_ow = {everyone: read_ow, bot_me: bot_ow}
         if mod_role:  role_list_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
         if spec_role: role_list_ow[spec_role] = read_ow
-        role_list_ch = await category.create_text_channel(ch_name_themed("role-list",    font, "📜", disney=disney, hp=hp), overwrites=role_list_ow)
+        role_list_ch = await category.create_text_channel(ch_name_themed("role-list",    font, "📜", disney=disney, hp=hp, greek=greek), overwrites=role_list_ow)
 
         # night-order — static reference channel, read-only for everyone
         night_ref_ow = {everyone: read_ow, bot_me: bot_ow}
         if spec_role: night_ref_ow[spec_role] = read_ow
         if mod_role:  night_ref_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True)
-        night_ref_ch = await category.create_text_channel(ch_name_themed("night-order", font, "🌙", disney=disney, hp=hp), overwrites=night_ref_ow)
+        night_ref_ch = await category.create_text_channel(ch_name_themed("night-order", font, "🌙", disney=disney, hp=hp, greek=greek), overwrites=night_ref_ow)
 
         night_order_embed = discord.Embed(
             title       = "🌙 Night Phase — Order of Operations",
@@ -10613,19 +11166,19 @@ class ConfirmStartView(View):
         if mod_role:  day_vote_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
         if p_role:    day_vote_ow[p_role]    = part_ow_vote
         if spec_role: day_vote_ow[spec_role] = part_ow_vote
-        day_vote_ch = await category.create_text_channel(ch_name_themed("day-vote",     font, "🗳️", disney=disney, hp=hp), overwrites=day_vote_ow)
+        day_vote_ch = await category.create_text_channel(ch_name_themed("day-vote",     font, "🗳️", disney=disney, hp=hp, greek=greek), overwrites=day_vote_ow)
 
         # timeline
         timeline_ow = {everyone: read_ow, bot_me: bot_ow}
         if mod_role:  timeline_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
         if spec_role: timeline_ow[spec_role] = read_ow
-        timeline_ch = await category.create_text_channel(ch_name_themed("timeline",     font, "⏰", disney=disney, hp=hp), overwrites=timeline_ow)
+        timeline_ch = await category.create_text_channel(ch_name_themed("timeline",     font, "⏰", disney=disney, hp=hp, greek=greek), overwrites=timeline_ow)
 
         # stats
         stats_ow = {everyone: read_ow, bot_me: bot_ow}
         if mod_role:  stats_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
         if spec_role: stats_ow[spec_role] = read_ow
-        stats_ch = await category.create_text_channel(ch_name_themed("stats",        font, "📊", disney=disney, hp=hp), overwrites=stats_ow)
+        stats_ch = await category.create_text_channel(ch_name_themed("stats",        font, "📊", disney=disney, hp=hp, greek=greek), overwrites=stats_ow)
 
         # spectator-qa — spectators ask questions, mods answer; players cannot see
         spec_qa_ow = {
@@ -10634,7 +11187,7 @@ class ConfirmStartView(View):
         }
         if mod_role:  spec_qa_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
         if spec_role: spec_qa_ow[spec_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
-        spec_qa_ch = await category.create_text_channel(ch_name_themed("spectator-qa", font, "👁️", disney=disney, hp=hp), overwrites=spec_qa_ow)
+        spec_qa_ch = await category.create_text_channel(ch_name_themed("spectator-qa", font, "👁️", disney=disney, hp=hp, greek=greek), overwrites=spec_qa_ow)
         # Pin a welcome message so spectators know how to use it
         spec_pin = await spec_qa_ch.send(
             "👁️ **Spectator Q&A**\n\n"
@@ -10652,7 +11205,7 @@ class ConfirmStartView(View):
         }
         if mod_role:  bb_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True)
         if spec_role: bb_ow[spec_role] = read_ow
-        bb_game_ch = await category.create_text_channel(ch_name_themed("blood-board", font, "🩸", disney=disney, hp=hp), overwrites=bb_ow)
+        bb_game_ch = await category.create_text_channel(ch_name_themed("blood-board", font, "🩸", disney=disney, hp=hp, greek=greek), overwrites=bb_ow)
 
         # wolf-den (wolf chat — dead wolves get read-only)
         # Bloodhound and Wolf Pup are wolf-team but NOT in the den
@@ -10666,7 +11219,7 @@ class ConfirmStartView(View):
         for wp in wolf_players:
             wolf_ow[wp] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
         if spec_role: wolf_ow[spec_role] = read_ow
-        wolf_ch = await category.create_text_channel(ch_name_themed("wolf-den",     font, "🐺", disney=disney, hp=hp), overwrites=wolf_ow)
+        wolf_ch = await category.create_text_channel(ch_name_themed("wolf-den",     font, "🐺", disney=disney, hp=hp, greek=greek), overwrites=wolf_ow)
 
         # wolf-vote — wolves + den-excluded wolf roles (Bloodhound, Wolf Pup) can all vote
         den_excluded = [p for p in players
@@ -10678,7 +11231,7 @@ class ConfirmStartView(View):
         ghost_ow = {everyone: discord.PermissionOverwrite(view_channel=False), bot_me: bot_ow}
         if mod_role:  ghost_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_messages=True)
         if spec_role: ghost_ow[spec_role] = read_ow
-        ghost_ch = await category.create_text_channel(ch_name_themed("ghost-chat",   font, "👻", disney=disney, hp=hp), overwrites=ghost_ow)
+        ghost_ch = await category.create_text_channel(ch_name_themed("ghost-chat",   font, "👻", disney=disney, hp=hp, greek=greek), overwrites=ghost_ow)
 
         # wraith-den — only if Wraiths are in the game
         wraith_players = [p for p in players if assignments.get(p.id) == "Wraith"]
@@ -10689,14 +11242,14 @@ class ConfirmStartView(View):
                 wraith_ow[wp] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
             if mod_role:  wraith_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True)
             if spec_role: wraith_ow[spec_role] = read_ow
-            wraith_ch = await category.create_text_channel(ch_name_themed("wraith-den", font, "👻", disney=disney, hp=hp), overwrites=wraith_ow)
+            wraith_ch = await category.create_text_channel(ch_name_themed("wraith-den", font, "👻", disney=disney, hp=hp, greek=greek), overwrites=wraith_ow)
 
         # win-tracker
         # Win tracker — mod only, never visible to players
         win_tracker_ow = {everyone: discord.PermissionOverwrite(view_channel=False), bot_me: bot_ow}
         if mod_role:  win_tracker_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=False, read_messages=True)
         if spec_role: win_tracker_ow[spec_role] = read_ow
-        win_tracker_ch = await category.create_text_channel(ch_name_themed("win-tracker", font, "⚖️", disney=disney, hp=hp), overwrites=win_tracker_ow)
+        win_tracker_ch = await category.create_text_channel(ch_name_themed("win-tracker", font, "⚖️", disney=disney, hp=hp, greek=greek), overwrites=win_tracker_ow)
 
         # village-chat — always created fresh inside the game category
         # This ensures multi-server support and clean channel permissions each game
@@ -10708,7 +11261,7 @@ class ConfirmStartView(View):
         if spec_role: village_chat_ow[spec_role] = discord.PermissionOverwrite(view_channel=True,  send_messages=False)
         if mod_role:  village_chat_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True,  send_messages=True)
         if dead_role: village_chat_ow[dead_role] = discord.PermissionOverwrite(view_channel=True,  send_messages=False)
-        village_chat_ch = await category.create_text_channel(ch_name_themed("village-chat", font, "💬", disney=disney, hp=hp), overwrites=village_chat_ow)
+        village_chat_ch = await category.create_text_channel(ch_name_themed("village-chat", font, "💬", disney=disney, hp=hp, greek=greek), overwrites=village_chat_ow)
 
         # private player channels
         player_channels = {}
@@ -10730,7 +11283,7 @@ class ConfirmStartView(View):
             player_channels[player.id] = ch.id
 
             # Send role card — player always sees their own role
-            embed    = build_role_card(player, role_name, role_info, font, disney=disney, hp=hp)
+            embed    = build_role_card(player, role_name, role_info, font, disney=disney, hp=hp, greek=greek)
             role_msg = await ch.send(player.mention, embed=embed)
             try:
                 await role_msg.pin()
@@ -11126,7 +11679,8 @@ class ConfirmStartView(View):
             chaos_hide_roles=1 if hide_roles else 0,
             chaos_hide_count=1 if hide_count else 0,
             disney_mode=1 if disney else 0,
-            hp_mode=1 if hp else 0
+            hp_mode=1 if hp else 0,
+            greek_mode=1 if greek else 0
         )
 
         # Timeline embed
@@ -11193,7 +11747,7 @@ class ConfirmStartView(View):
         )
 
         # Announce mode to village-chat
-        if disney or hp or hide_roles or hide_count:
+        if disney or hp or greek or hide_roles or hide_count:
             vc_announce = interaction.guild.get_channel(
                 (cached_get_state(interaction.guild_id) or {}).get("village_chat_ch_id") or 0)
             if vc_announce:
@@ -11209,6 +11763,12 @@ class ConfirmStartView(View):
                         "*The Order of the Phoenix and Death Eaters walk among you.*\n"
                         "*The wizarding world will not rest until the Dark Lord's servants are found.*\n\n"
                         "🪄 *This is a Harry Potter themed game. Your role card shows your character.*")
+                elif greek:
+                    await vc_announce.send(
+                        "🏛️ **Welcome to Mount Olympus**\n\n"
+                        "*Olympians and Titans walk among you. The age of gods hangs in the balance.*\n"
+                        "*Olympus will not rest until the Titans hidden among the gods are found.*\n\n"
+                        "⚡ *This is a Greek Gods themed game. Your role card shows your divine character.*")
                 elif hide_roles and hide_count:
                     await vc_announce.send(
                         "🌪️ **Full Chaos Game**\n"
@@ -11533,7 +12093,7 @@ async def add_player(interaction: discord.Interaction, player: discord.Member, r
     font    = get_guild_font(interaction.guild_id)
     disney  = is_disney_mode(interaction.guild_id)
     hp      = is_hp_mode(interaction.guild_id)
-    embed   = build_role_card(player, role_name, role_info, font, disney=disney, hp=hp)
+    embed   = build_role_card(player, role_name, role_info, font, disney=disney, hp=hp, greek=greek)
     await ch.send(player.mention, embed=embed)
 
     # If night phase — send night action prompt
@@ -13789,8 +14349,9 @@ async def start_day_vote(interaction: discord.Interaction,
                      agitator_elim_count=0,
                      votes_per_player=votes_per_player)
     else:
-        # Auto-detect agitator frenzy from night actions
-        actions_check = db_get_night_actions(interaction.guild_id, night_num_check)
+        # Auto-detect agitator frenzy from PREVIOUS night's actions
+        prev_night    = max(1, night_num_check - 1)
+        actions_check = db_get_night_actions(interaction.guild_id, prev_night)
         if any(a[1] == "agitator_frenzy" for a in actions_check):
             state_cur = db_get_state(interaction.guild_id) or {}
             if not state_cur.get("agitator_frenzy_day"):
@@ -14049,7 +14610,13 @@ class LastWillModal(discord.ui.Modal, title="Your Final Message"):
         state  = cached_get_state(self.guild_id) or {}
         disney = bool(state.get("disney_mode", 0))
         hp     = bool(state.get("hp_mode", 0))
-        vc_ch  = interaction.guild.get_channel(state.get("village_chat_ch_id") or 0)
+        vc_ch_id = state.get("village_chat_ch_id") or 0
+        vc_ch    = interaction.guild.get_channel(vc_ch_id)
+        if not vc_ch and vc_ch_id:
+            try:
+                vc_ch = await interaction.guild.fetch_channel(vc_ch_id)
+            except Exception:
+                vc_ch = None
 
         if not vc_ch:
             return await interaction.followup.send(
@@ -14747,6 +15314,11 @@ async def _eliminate_player(guild: discord.Guild, player_id: int, reason: str):
     try:
         priv_ch_id = assignment[3] if len(assignment) > 3 else None
         priv_ch    = guild.get_channel(priv_ch_id) if priv_ch_id else None
+        if not priv_ch and priv_ch_id:
+            try:
+                priv_ch = await guild.fetch_channel(priv_ch_id)
+            except Exception:
+                priv_ch = None
         if priv_ch:
             state_lw = cached_get_state(guild.id) or {}
             disney   = bool(state_lw.get("disney_mode", 0))
@@ -14830,6 +15402,9 @@ NEUTRAL_WIN_CONDITIONS = {
     # Fairy Elf wins if they used their happy ending AND are still alive
     "Fairy Elf": lambda rows, guild_id: any(
         r[1] == "Fairy Elf" and r[2] == 1 for r in rows),
+    # Chaos Gremlin wins if alive at game end — independent of winning team
+    "Chaos Gremlin": lambda rows, guild_id: any(
+        r[1] == "Chaos Gremlin" and r[2] == 1 for r in rows),
 }
 
 async def check_win_condition(guild):
@@ -14867,6 +15442,7 @@ async def announce_win(guild, winner: str):
     state    = cached_get_state(guild.id)
     disney   = bool(state.get("disney_mode", 0))
     hp       = bool(state.get("hp_mode", 0))
+    greek    = bool(state.get("greek_mode", 0))
     cat      = guild.get_channel(state.get("category_id") or 0)
     skip     = {state.get("mod_log_channel_id"), state.get("wolf_channel_id"),
                 state.get("ghost_channel_id")}
@@ -14882,6 +15458,11 @@ async def announce_win(guild, winner: str):
         wolf_team    = "Death Eaters"
         setting      = "the Wizarding World"
         neutral_team = "Unaligned"
+    elif greek:
+        village_team = "Olympians"
+        wolf_team    = "Titans"
+        setting      = "Mount Olympus"
+        neutral_team = "Fates"
     else:
         village_team = "Village"
         wolf_team    = "Wolves"
@@ -14973,6 +15554,17 @@ async def announce_win(guild, winner: str):
             "*The Order believed it had seen the worst. It had not. The Death Eaters have won.*",
             "*The Wizarding World is quiet now. The kind of quiet that means the Dark Lord has prevailed.*",
             "*The last wand that might have stopped them is still. The Wizarding World belongs to the dark now.*",
+        ]
+    elif greek:
+        VILLAGE_WIN_MESSAGES = [
+            "*The Titans have been cast down. Olympus stands. The age of gods endures.*",
+            "*By dawn, the last Titan hidden among the gods had been found. The Olympians are victorious.*",
+            "*It is over. The old order holds. Mount Olympus will not fall today.*",
+        ]
+        WOLF_WIN_MESSAGES = [
+            "*Olympus has fallen. The Titans reclaim what was taken from them.*",
+            "*Mount Olympus is quiet now. The kind of quiet that comes after a war has been decided.*",
+            "*The last Olympian who might have stopped them is gone. The age of Titans begins.*",
         ]
     else:
         VILLAGE_WIN_MESSAGES = [
@@ -16821,6 +17413,19 @@ class SeerView(BaseNightView):
         guild      = interaction.guild
         guild_id   = interaction.guild_id
         night_num  = db_get_night_num(guild_id)
+
+        # Alibi Token redirect — if target has an alibi active, investigate the decoy instead
+        state = cached_get_state(guild_id) or {}
+        alibi_owner  = state.get("alibi_token_owner")
+        alibi_target = state.get("alibi_token_target")
+        if alibi_owner and alibi_target and alibi_owner == target_id:
+            # Silently redirect — Seer never knows
+            target_id = alibi_target
+            await post_mod_log(guild,
+                f"📋 **Alibi Token fired** — Seer was redirected from "
+                f"{guild.get_member(alibi_owner).display_name if guild.get_member(alibi_owner) else alibi_owner} "
+                f"to decoy target.")
+
         db_save_night_action(guild_id, night_num, self.actor_id, "seer", target_id)
 
         rows        = db_get_assignments(guild_id)
@@ -17132,6 +17737,16 @@ class MediumView(BaseNightView):
         guild      = interaction.guild
         guild_id   = interaction.guild_id
         night_num  = db_get_night_num(guild_id)
+
+        # Alibi Token redirect
+        state = cached_get_state(guild_id) or {}
+        alibi_owner  = state.get("alibi_token_owner")
+        alibi_target = state.get("alibi_token_target")
+        if alibi_owner and alibi_target and alibi_owner == target_id:
+            target_id = alibi_target
+            await post_mod_log(guild,
+                f"📋 **Alibi Token fired** — Medium redirected to decoy target.")
+
         db_save_night_action(guild_id, night_num, self.actor_id, "medium", target_id)
 
         rows        = db_get_assignments(guild_id)
@@ -17738,6 +18353,15 @@ class BloodhoundView(BaseNightView):
         guild      = interaction.guild
         guild_id   = interaction.guild_id
         night_num  = db_get_night_num(guild_id)
+
+        # Alibi Token redirect
+        state = cached_get_state(guild_id) or {}
+        alibi_owner  = state.get("alibi_token_owner")
+        alibi_target = state.get("alibi_token_target")
+        if alibi_owner and alibi_target and alibi_owner == target_id:
+            target_id = alibi_target
+            await post_mod_log(guild,
+                f"📋 **Alibi Token fired** — Bloodhound redirected to decoy target.")
 
         # Save the action
         db_save_night_action(guild_id, night_num, self.actor_id, "bloodhound", target_id)
@@ -18527,6 +19151,163 @@ async def _send_day_ability_buttons(guild, guild_id: int, vote_end_ts: int):
 
 
 # ── Dispatcher — returns the right view for each role ─────────────────────
+class ChaosGremlinNightView(BaseNightView):
+    """
+    Each night the Chaos Gremlin spins a random role ability.
+    They receive that ability for one night only.
+    Alpha and Elite Alpha are excluded from the pool.
+    """
+    EXCLUDED_ROLES = {"Alpha", "Elite Alpha", "Chaos Gremlin"}
+
+    def __init__(self, guild_id, actor_id, role_name, alive_players):
+        super().__init__(guild_id=guild_id, actor_id=actor_id,
+                         role_name=role_name, night_num=db_get_night_num(guild_id))
+        import random as _cgr
+        self.guild_id    = guild_id
+        self.actor_id    = actor_id
+        self.alive_players = alive_players
+
+        # Spin the wheel — pick from all roles in the game except excluded
+        rows        = db_get_assignments(guild_id)
+        alive_roles = list({r[1] for r in rows if r[2] == 1
+                            and r[1] not in self.EXCLUDED_ROLES})
+        self.spun_role = _cgr.choice(alive_roles) if alive_roles else None
+
+        spin_btn = Button(
+            label     = f"🎰 Spun: {self.spun_role or 'Nothing'} — Use Ability",
+            style     = discord.ButtonStyle.primary,
+            custom_id = f"cg_use_{guild_id}_{actor_id}_{db_get_night_num(guild_id)}"
+        )
+        spin_btn.callback = self.on_use
+        self.add_item(spin_btn)
+
+        pass_btn = Button(
+            label     = "💤 Pass — Skip tonight",
+            style     = discord.ButtonStyle.secondary,
+            custom_id = f"cg_pass_{guild_id}_{actor_id}_{db_get_night_num(guild_id)}"
+        )
+        pass_btn.callback = self.on_pass
+        self.add_item(pass_btn)
+
+    async def on_use(self, interaction: discord.Interaction):
+        if interaction.user.id != self.actor_id:
+            return await interaction.response.send_message(
+                "❌ This isn't your ability.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+
+        night_num = db_get_night_num(self.guild_id)
+        spun      = self.spun_role
+
+        if not spun:
+            await interaction.followup.send("❌ No ability was spun.", ephemeral=True)
+            return
+
+        # Check: Clone with no dead players
+        if spun == "Clone":
+            elim_log = db_get_elimination_log(self.guild_id)
+            if not elim_log:
+                db_record_night_action(self.guild_id, night_num, self.actor_id, "_pass", None)
+                await interaction.response.edit_message(
+                    content=f"🎰 You spun **{spun}** but no one has died yet — ability lost tonight.",
+                    view=None)
+                return
+
+        # If spun role has a view, post that view in their channel
+        view_cls = ROLE_VIEW_MAP.get(spun)
+        if view_cls:
+            try:
+                spin_view = view_cls(self.guild_id, self.actor_id, spun, self.alive_players)
+                await interaction.followup.send(
+                    f"🎰 You spun **{spun}**! Use the ability below:",
+                    view=spin_view, ephemeral=True)
+                db_record_night_action(self.guild_id, night_num, self.actor_id,
+                                       "chaos_gremlin_spin", None)
+                await post_mod_log(interaction.guild,
+                    f"🎰 **Chaos Gremlin** spun **{spun}** — Night {night_num}")
+            except Exception as e:
+                await interaction.followup.send(
+                    f"🎰 You spun **{spun}** but couldn't use the ability: {e}", ephemeral=True)
+        else:
+            # Passive role — notify mod to apply effect manually
+            db_record_night_action(self.guild_id, night_num, self.actor_id,
+                                   "chaos_gremlin_passive", None)
+            await interaction.followup.send(
+                f"🎰 You spun **{spun}** — this is a passive role. "
+                f"The mod has been notified to apply the effect.", ephemeral=True)
+            await post_mod_log(interaction.guild,
+                f"🎰 **Chaos Gremlin** spun **{spun}** (passive) — Night {night_num}\n"
+                f"⚠️ Apply the passive effect manually if applicable.")
+        await interaction.message.edit(view=None)
+        self.stop()
+
+    async def on_pass(self, interaction: discord.Interaction):
+        if interaction.user.id != self.actor_id:
+            return await interaction.response.send_message(
+                "❌ This isn't your action.", ephemeral=True)
+        night_num = db_get_night_num(self.guild_id)
+        db_record_night_action(self.guild_id, night_num, self.actor_id, "_pass", None)
+        await interaction.response.edit_message(
+            content="💤 You chose to pass tonight.", view=None)
+        self.stop()
+
+
+async def _spin_chaos_gremlin_day_vote(guild, guild_id: int, night_num: int):
+    """
+    Called when day vote opens — spins a random alive player for the
+    Chaos Gremlin and tells them privately who to vote for.
+    """
+    import random as _cgd
+    rows = db_get_assignments(guild_id)
+    gremlin_row = next((r for r in rows if r[1] == "Chaos Gremlin" and r[2] == 1), None)
+    if not gremlin_row:
+        return
+
+    pid, _, _, ch_id = gremlin_row
+    alive_others = [r for r in rows if r[2] == 1 and r[0] != pid]
+    if not alive_others:
+        return
+
+    target_row = _cgd.choice(alive_others)
+    target_m   = guild.get_member(target_row[0])
+    target_nm  = target_m.display_name if target_m else str(target_row[0])
+
+    priv_ch = guild.get_channel(ch_id)
+    if not priv_ch:
+        try:
+            priv_ch = await guild.fetch_channel(ch_id)
+        except Exception:
+            return
+
+    state  = cached_get_state(guild_id) or {}
+    disney = bool(state.get("disney_mode", 0))
+    hp     = bool(state.get("hp_mode", 0))
+    greek  = bool(state.get("greek_mode", 0))
+
+    if disney:
+        title = "🎰 The Magic Wheel Has Spoken"
+        desc  = f"*The enchanted wheel has spun and made your choice for you.*\n\nYou **must vote for {target_nm}** today."
+    elif hp:
+        title = "🎰 Peeves Has Decided"
+        desc  = f"*Chaos reigns. The wheel has chosen your vote.*\n\nYou **must vote for {target_nm}** today."
+    elif greek:
+        title = "🎰 Ate Has Chosen"
+        desc  = f"*The goddess of chaos has decided your fate.*\n\nYou **must vote for {target_nm}** today."
+    else:
+        title = "🎰 The Chaos Wheel Has Spoken"
+        desc  = f"*You don't get to choose. That's the deal.*\n\nYou **must vote for {target_nm}** today."
+
+    embed = discord.Embed(title=title, description=desc, color=0x9B59B6)
+    embed.set_footer(text="Vote as directed or lose your night ability. The chaos demands it.")
+    try:
+        await priv_ch.send(embed=embed)
+    except Exception as e:
+        print(f"[chaos_gremlin_day] send failed: {e}")
+
+    await post_mod_log(guild,
+        f"🎰 **Chaos Gremlin day spin** — Day {night_num}\n"
+        f"Assigned vote: **{target_nm}**")
+
+
 ROLE_VIEW_MAP = {
     # Village — active night abilities only
     "Seer":          SeerView,
@@ -18553,6 +19334,7 @@ ROLE_VIEW_MAP = {
     # Neutral — active night abilities only
     "Wraith":        WraithMarkView,
     "Clone":         CloneView,  # Night 1 only — blocked after
+    "Chaos Gremlin": ChaosGremlinNightView,
     # Removed from map (no night action button needed):
     # Governor — day pardon button posted in private channel when vote opens
     # Hermit — day ability button posted in private channel when vote opens
@@ -19702,7 +20484,8 @@ async def resolve_night(guild: discord.Guild, night_num: int):
                     embed=embed)
 
             # Clear shadow token state
-            db_set_state(guild_id, **{"shadow_token_target": None, "shadow_token_owner": None})
+            db_set_state(guild_id, **{"shadow_token_target": None, "shadow_token_owner": None,
+                                       "alibi_token_target": None,  "alibi_token_owner":  None})
     except Exception as e:
         print(f"[resolve_night] shadow token report failed: {e}")
 
