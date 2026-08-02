@@ -28115,3 +28115,12 @@ async def help_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 # ====================== SETUP GUIDE ======================
+
+
+# ====================== BOT STARTUP ======================
+
+TOKEN = os.getenv("DISCORD_TOKEN")
+if not TOKEN:
+    print("ERROR: DISCORD_TOKEN environment variable not set.")
+else:
+    client.run(TOKEN)
