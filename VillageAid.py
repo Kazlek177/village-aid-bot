@@ -26108,118 +26108,267 @@ class WizardQ1PlayerCount(discord.ui.Modal, title="Game Setup — Step 1 of 6"):
                 "❌ Please enter a number between 4 and 50.", ephemeral=True)
 
         self.state.player_count = n
-        view = WizardQ2ReservationsView(self.guild_id, self.state)
+        view = WizardQ2ReservationsView(self.guild_id, self.state, guild=interaction.guild)
         await interaction.response.send_message(
             embed=view.build_embed(), view=view, ephemeral=True)
 
 
 class WizardQ2ReservationsView(View):
-    """Ask if anyone has a reserved role."""
-    def __init__(self, guild_id: int, state: SetupWizardState):
-        super().__init__(timeout=300)
+    """
+    Step 2 — Reserved roles.
+    Three buttons: Add Reservation, No Reservations, Done (move on).
+    Uses dropdowns instead of modals to avoid interaction timeout.
+    """
+    def __init__(self, guild_id: int, state: SetupWizardState,
+                 guild: discord.Guild = None):
+        super().__init__(timeout=600)
         self.guild_id = guild_id
         self.state    = state
+        self.guild    = guild
+        self._build()
 
-        yes_btn = Button(label="✅ Yes — someone has a reserved role",
-                         style=discord.ButtonStyle.primary)
-        no_btn  = Button(label="⏭️ No reservations — skip",
-                         style=discord.ButtonStyle.secondary)
-        yes_btn.callback = self.on_yes
-        no_btn.callback  = self.on_no
-        self.add_item(yes_btn)
-        self.add_item(no_btn)
+    def _build(self):
+        self.clear_items()
+
+        # Add Reservation button — opens player+role selectors
+        add_btn = Button(
+            label  = "➕ Add a Reservation",
+            style  = discord.ButtonStyle.primary,
+            row    = 0
+        )
+        add_btn.callback = self.on_add
+        self.add_item(add_btn)
+
+        # Done / No Reservations button
+        if self.state.reservations:
+            done_btn = Button(
+                label  = "✅ Done — move to next step",
+                style  = discord.ButtonStyle.green,
+                row    = 0
+            )
+            done_btn.callback = self.on_done
+            self.add_item(done_btn)
+
+            # Remove last button if reservations exist
+            remove_btn = Button(
+                label  = "❌ Remove Last Reservation",
+                style  = discord.ButtonStyle.danger,
+                row    = 0
+            )
+            remove_btn.callback = self.on_remove
+            self.add_item(remove_btn)
+        else:
+            skip_btn = Button(
+                label  = "⏭️ No Reservations — skip",
+                style  = discord.ButtonStyle.secondary,
+                row    = 0
+            )
+            skip_btn.callback = self.on_done
+            self.add_item(skip_btn)
 
     def build_embed(self):
         reserved = self.state.reservations
-        lines = [f"**{v}** → <@{k}>" for k, v in reserved.items()]
-        desc  = (
+        desc = (
             f"**Players:** {self.state.player_count}\n\n"
             "Does anyone have a reserved role for this game?\n"
-            "*(Reserved roles are assigned automatically at game start.)*\n\n"
+            "*(Reserved roles are assigned to that player automatically at game start.)*\n\n"
         )
-        if lines:
-            desc += "**Current reservations:**\n" + "\n".join(lines)
+        if reserved:
+            lines = []
+            for pid, role in reserved.items():
+                m    = self.guild.get_member(pid) if self.guild else None
+                name = m.display_name if m else str(pid)
+                lines.append(f"• **{name}** → {role}")
+            desc += "**Current reservations:**\n" + "\n".join(lines) + "\n\n"
+            desc += "*Add more or click ✅ Done to continue.*"
+        else:
+            desc += "*No reservations added yet.*"
         return discord.Embed(
             title       = "Step 2 of 6 — Reserved Roles",
             description = desc,
             color       = 0x9B59B6
         )
 
-    async def on_yes(self, interaction: discord.Interaction):
-        await interaction.response.send_modal(
-            WizardReservationModal(self.guild_id, self.state, self))
+    async def on_add(self, interaction: discord.Interaction):
+        """Show player dropdown first."""
+        members = [m for m in interaction.guild.members
+                   if not m.bot][:25]
+        if not members:
+            return await interaction.response.send_message(
+                "No members found.", ephemeral=True)
 
-    async def on_no(self, interaction: discord.Interaction):
-        # Clear existing DB reservations and move to step 3
+        player_opts = [discord.SelectOption(
+            label = m.display_name[:80],
+            value = str(m.id)
+        ) for m in members]
+
+        view = WizardReservationPickerView(
+            self.guild_id, self.state, player_opts, parent=self)
+        await interaction.response.edit_message(
+            embed = discord.Embed(
+                title       = "Step 2 of 6 — Add Reservation",
+                description = "**Step 1:** Choose a player from the dropdown below.",
+                color       = 0x9B59B6
+            ),
+            view = view
+        )
+
+    async def on_remove(self, interaction: discord.Interaction):
+        """Remove the last added reservation."""
+        if self.state.reservations:
+            last_key = list(self.state.reservations.keys())[-1]
+            del self.state.reservations[last_key]
+        self.guild = interaction.guild
+        self._build()
+        await interaction.response.edit_message(
+            embed = self.build_embed(), view = self)
+
+    async def on_done(self, interaction: discord.Interaction):
+        """Save reservations to DB and advance to step 3."""
         conn = sqlite3.connect(DB_FILE)
         c    = conn.cursor()
         c.execute("DELETE FROM reservations WHERE guild_id=?", (self.guild_id,))
         conn.commit()
         conn.close()
-        # Save state reservations to DB
         for pid, role in self.state.reservations.items():
             m    = interaction.guild.get_member(pid)
             name = m.display_name if m else str(pid)
             db_set_reservation(self.guild_id, pid, name, role)
         view = WizardQ3ThemeView(self.guild_id, self.state)
-        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+        await interaction.response.edit_message(
+            embed = view.build_embed(), view = view)
+
+
+class WizardReservationPickerView(View):
+    """Two-step dropdown — pick player then role."""
+    ALL_ROLES = [
+        "Wolf","Alpha","Elite Alpha","Blessed Wolf","Bloodhound","Bloodletter",
+        "Crazed Wolf","Dire Wolf","Echo-Stalker","Shadow Wolf","Werekitten","Wolf Pup",
+        "Villager","Seer","Doctor","Surgeon","Huntsman","Sheriff","Medium","Mayor",
+        "Governor","Elder","Insomniac","Agitator","Hermit","Cupid","Gravedigger",
+        "Clone","Shapeshifter","Drunk","Pothead","Flirt","Jafar","Lycan","Time Lord",
+        "Village Idiot","Village Jokester","Virgin","Traitor","White Wolf","Diseased",
+        "Witch","Oracle","Warlock","Fairy Elf","Wraith","Chaos Gremlin",
+    ]
+
+    def __init__(self, guild_id, state, player_opts, parent):
+        super().__init__(timeout=300)
+        self.guild_id    = guild_id
+        self.state       = state
+        self.parent      = parent
+        self.selected_pid  = None
+        self.selected_name = None
+
+        # Player dropdown
+        player_sel = Select(
+            placeholder = "1️⃣ Choose a player...",
+            options     = player_opts,
+            row         = 0
+        )
+        player_sel.callback = self.on_player
+        self.add_item(player_sel)
+
+        # Role dropdown (25 roles max per Select — split into two)
+        role_opts_1 = [discord.SelectOption(label=r, value=r)
+                       for r in self.ALL_ROLES[:25]]
+        role_sel = Select(
+            placeholder = "2️⃣ Choose a role...",
+            options     = role_opts_1,
+            row         = 1
+        )
+        role_sel.callback = self.on_role
+        self.add_item(role_sel)
+
+        # Confirm button
+        confirm = Button(
+            label    = "✅ Confirm Reservation",
+            style    = discord.ButtonStyle.green,
+            disabled = True,
+            row      = 2
+        )
+        confirm.callback = self.on_confirm
+        self._confirm    = confirm
+        self.add_item(confirm)
+
+        # Back button
+        back = Button(
+            label    = "← Back",
+            style    = discord.ButtonStyle.secondary,
+            row      = 2
+        )
+        back.callback = self.on_back
+        self.add_item(back)
+
+        self._selected_role = None
+
+    async def on_player(self, interaction: discord.Interaction):
+        self.selected_pid  = int(interaction.data["values"][0])
+        m = interaction.guild.get_member(self.selected_pid)
+        self.selected_name = m.display_name if m else str(self.selected_pid)
+        self._maybe_enable_confirm()
+        await interaction.response.edit_message(
+            embed = self._build_embed(), view = self)
+
+    async def on_role(self, interaction: discord.Interaction):
+        self._selected_role = interaction.data["values"][0]
+        self._maybe_enable_confirm()
+        await interaction.response.edit_message(
+            embed = self._build_embed(), view = self)
+
+    def _maybe_enable_confirm(self):
+        self._confirm.disabled = not (self.selected_pid and self._selected_role)
+
+    def _build_embed(self):
+        lines = []
+        if self.selected_name:
+            lines.append(f"**Player:** {self.selected_name} ✅")
+        else:
+            lines.append("**Player:** *not selected*")
+        if self._selected_role:
+            lines.append(f"**Role:** {self._selected_role} ✅")
+        else:
+            lines.append("**Role:** *not selected*")
+        return discord.Embed(
+            title       = "Step 2 of 6 — Add Reservation",
+            description = "Select a player and a role, then click Confirm.\n\n" + "\n".join(lines),
+            color       = 0x9B59B6
+        )
+
+    async def on_confirm(self, interaction: discord.Interaction):
+        if not self.selected_pid or not self._selected_role:
+            return await interaction.response.send_message(
+                "Please select both a player and a role.", ephemeral=True)
+        self.state.reservations[self.selected_pid] = self._selected_role
+        self.parent.guild = interaction.guild
+        self.parent._build()
+        await interaction.response.edit_message(
+            embed = self.parent.build_embed(),
+            view  = self.parent)
+
+    async def on_back(self, interaction: discord.Interaction):
+        self.parent.guild = interaction.guild
+        self.parent._build()
+        await interaction.response.edit_message(
+            embed = self.parent.build_embed(),
+            view  = self.parent)
 
 
 class WizardReservationModal(discord.ui.Modal, title="Add a Reservation"):
-    """Collect one reservation at a time."""
+    """Kept for legacy compatibility but no longer used in wizard flow."""
     player_mention = discord.ui.TextInput(
-        label       = "Player username or @mention",
-        placeholder = "e.g. @JohnDoe or JohnDoe",
-        required    = True
-    )
+        label="Player username", placeholder="e.g. JohnDoe", required=True)
     role_name = discord.ui.TextInput(
-        label       = "Role name",
-        placeholder = "e.g. Alpha, Seer, Witch",
-        required    = True
-    )
+        label="Role name", placeholder="e.g. Alpha, Seer, Witch", required=True)
 
-    def __init__(self, guild_id: int, state: SetupWizardState, parent_view):
+    def __init__(self, guild_id, state, parent_view):
         super().__init__()
         self.guild_id    = guild_id
         self.state       = state
         self.parent_view = parent_view
 
-    async def on_submit(self, interaction: discord.Interaction):
-        # Resolve member
-        raw   = self.player_mention.value.strip().lstrip("@<").rstrip(">")
-        member = None
-        # Try by ID
-        try:
-            member = interaction.guild.get_member(int(raw))
-        except ValueError:
-            pass
-        # Try by name
-        if not member:
-            raw_lower = raw.lower()
-            member = discord.utils.find(
-                lambda m: m.display_name.lower() == raw_lower
-                       or m.name.lower() == raw_lower,
-                interaction.guild.members)
-        if not member:
-            return await interaction.response.send_message(
-                f"❌ Couldn't find player **{raw}**. Try their exact username.", ephemeral=True)
-
-        # Validate role exists
-        roles     = db_load_roles(self.guild_id)
-        role_input = self.role_name.value.strip()
-        role_match = next(
-            (r["name"] for r in roles if r["name"].lower() == role_input.lower()), None)
-        if not role_match:
-            all_names = ", ".join(r["name"] for r in roles[:20])
-            return await interaction.response.send_message(
-                f"❌ Role **{role_input}** not found.\nAvailable: {all_names}...",
-                ephemeral=True)
-
-        self.state.reservations[member.id] = role_match
-        # Refresh the parent view
-        self.parent_view.state = self.state
-        await interaction.response.edit_message(
-            embed=self.parent_view.build_embed(), view=self.parent_view)
+    async def on_submit(self, interaction):
+        await interaction.response.send_message(
+            "Please use the dropdown buttons instead.", ephemeral=True)
 
 
 class WizardQ3ThemeView(View):
