@@ -724,7 +724,21 @@ def init_db():
     except Exception:
         pass
     try:
-        c.execute("ALTER TABLE game_state ADD COLUMN witch_coh_used INTEGER DEFAULT 0")
+        c.execute("ALTER TABLE game_state ADD COLUMN token_shop_ch_id INTEGER DEFAULT NULL")
+    except Exception:
+        pass
+    try:
+        c.execute("ALTER TABLE game_state ADD COLUMN token_shop_open INTEGER DEFAULT 1")
+    except Exception:
+        pass
+    try:
+        c.execute("""CREATE TABLE IF NOT EXISTS token_shop_trades (
+            guild_id   INTEGER,
+            player_id  INTEGER,
+            old_token  TEXT,
+            new_token  TEXT,
+            traded_at  INTEGER,
+            PRIMARY KEY (guild_id, player_id))""")
     except Exception:
         pass
     try:
@@ -1051,9 +1065,11 @@ DEFAULT_ROLES = [
      "The den can use the Werekitten for a kill a maximum of 2 times per game. "
      "If voted out, their true identity is revealed and all role actions are silenced for the night."),
     ("White Wolf",      "village", 1,
-     "Feels remorse. Starting Night 1, can choose to kill or not each night independently of the pack. "
-     "If no successful kill within three nights, the White Wolf dies. NOT in the den and not in wolf count. "
-     "Can be turned but loses all abilities."),
+     "A wolf that feels remorse for what they have become. Starting Night 2, can choose to kill or not each night independently of the pack. "
+     "If no successful kill within three nights, the White Wolf dies. "
+     "NOT part of the wolf den and NOT counted in the wolf count. "
+     "Can be turned but loses all abilities and can then die by wolves. "
+     "Not in the den and not in wolf count."),
     ("Wolf Pup",        "wolf",    1,
      "Can block a player every night — if that player has a special role, they cannot use it for 24 hours. "
      "Cannot target the same person two nights in a row. Not in the den. If last wolf standing, "
@@ -1064,28 +1080,29 @@ DEFAULT_ROLES = [
      "The revived player returns with their original role, silently. The village is not told. "
      "Submitted through the night button. "
      "Appears as Neutral to Seer and Medium. "
-     "Win: be alive when the game ends."),
+     "Win: use the revival ability AND be alive when the game ends — join the winning team."),
     ("Oracle",          "neutral", 1,
-     "Each night, consults their crystal ball to prophesy which player will die. "
-     "Submits one name privately per night. If the prophecy comes true that night or the following day, "
-     "the Oracle is declared among the winners at game end regardless of which team wins. "
-     "One correct prophecy is enough. Appears as Neutral to Seer and Medium. "
-     "Win: at least one prophecy is correct by game end."),
-    ("Warlock",         "neutral", 1,
-     "Once per game, can swap the roles of any two alive players permanently. "
-     "Neither player is notified by the bot — the mod sends new role cards. "
-     "The Warlock chooses both players privately through their night button. "
+     "Starting Night 2, consults their crystal ball to ask the mod one yes or no question per night. "
+     "The wisdom imparted must be handled lightly — the Oracle may not share the answer outright with the village. "
+     "If they reveal the answer directly they meet an untimely end for angering the mods. "
      "Appears as Neutral to Seer and Medium. "
-     "Win: be alive when the game ends."),
+     "Win: be alive when the game ends and have their knowledge contribute to the outcome — join the winning team."),
+    ("Warlock",         "neutral", 1,
+     "Once per game, can grant a wish. Any player may secretly contact the mod with a wish they want granted. "
+     "The mod notifies the Warlock that a wish has been requested — but not what it is. "
+     "The Warlock then chooses to grant it or not. If granted, a wheel is spun to determine the price: "
+     "one player is removed from the game. The Warlock never learns what wish they granted. "
+     "Appears as Neutral to Seer and Medium. "
+     "Win: grant their wish AND be alive when the game ends — join the winning team."),
     ("Witch",           "neutral", 1,
      "Has one healing potion and one poison potion per game. Healing saves a wolf victim; "
      "poison kills another player. Can use one, both, or neither every other night starting Night 2. "
      "Also has Change of Heart — once per game, converts any player to the opposite team: "
      "wolves become plain Villagers, villagers become plain Wolves. "
      "Appears as Neutral to Seer and Medium. "
-     "Win: use BOTH potions and be alive at game end — independent of which team wins."),
+     "Win: use BOTH potions AND be alive when the game ends — join the winning team."),
     ("Wraith",          "neutral", 2,
-     "Third faction — two Wraiths, one purpose. Each night, mark one player silently. "
+     "Third faction — two or more Wraiths depending on game size, one purpose. Each night, mark one player silently. "
      "The marked player will not know. The Blood Board will hint that something moved through Whisperfall. "
      "Marks persist until the Kill Command is issued. When both Wraiths agree, replace your mark with the "
      "Kill Command — all marked players die simultaneously. One-time ability; Wraiths cannot act again after. "
@@ -1102,8 +1119,8 @@ DEFAULT_ROLES = [
      "If you spin Agitator, you may use it even if someone else already has. "
      "Once per game, you may skip the spin and freely choose any ability instead. "
      "Appears as Neutral to Seer and Medium. "
-     "Win: Be alive when the game ends — regardless of which team wins. "
-     "Your win is independent. Finding the Chaos Gremlin before the end is in everyone's interest."),
+     "Win: survive to the end of the game — independent of which team wins. "
+     "Your victory is your own. You neither help nor hinder any team by design."),
 ]
 
 def load_default_roles(guild_id):
@@ -3829,7 +3846,7 @@ async def use_token(interaction: discord.Interaction, token_type: str):
     token = TOKENS.get(token_type, {})
 
     # Tokens that need a target — show a target selector
-    if token_type in ("peek", "save", "silence", "reveal", "shadow", "decoy",
+    if token_type in ("peek", "save", "silence", "magnet", "shadow", "decoy",
                        "frame", "redirect", "alibi", "bloodscent"):
         view = TokenTargetView(interaction.guild_id, interaction.user.id,
                                token_type, guild=interaction.guild)
@@ -3929,21 +3946,37 @@ async def use_token(interaction: discord.Interaction, token_type: str):
                 await interaction.followup.send(
                     "🎰 **Heads!** No wolves found to reveal.", ephemeral=True)
         else:
-            # One wolf learns your role
-            wolves = [r for r in rows if r[2] == 1 and get_team(interaction.guild_id, r[1]) == "wolf"]
-            my_row = next((r for r in rows if r[0] == interaction.user.id), None)
+            # Tails — entire wolf den learns your role
+            wolves  = [r for r in rows if r[2] == 1 and get_team(interaction.guild_id, r[1]) == "wolf"]
+            my_row  = next((r for r in rows if r[0] == interaction.user.id), None)
             my_role = my_row[1] if my_row else "Unknown"
-            if wolves:
-                wolf_row = _rand.choice(wolves)
+            notified = 0
+            for wolf_row in wolves:
                 wolf_ch_id = wolf_row[3] if len(wolf_row) > 3 else None
                 wolf_ch    = interaction.guild.get_channel(wolf_ch_id) if wolf_ch_id else None
                 if wolf_ch:
+                    try:
+                        await wolf_ch.send(
+                            f"🎰 **Gamble Token fired!**\n"
+                            f"**{interaction.user.display_name}** is playing as **{my_role}**.")
+                        notified += 1
+                    except Exception:
+                        pass
+            # Also notify wolf den channel if it exists
+            state_g  = cached_get_state(interaction.guild_id) or {}
+            wolf_ch  = interaction.guild.get_channel(state_g.get("wolf_channel_id") or 0)
+            if wolf_ch:
+                try:
                     await wolf_ch.send(
-                        f"🎰 **Gamble Token fired!** You learn that **{interaction.user.display_name}** "
-                        f"is playing as **{my_role}**.")
+                        f"🎰 **Gamble Token fired!**\n"
+                        f"**{interaction.user.display_name}** is playing as **{my_role}**.")
+                except Exception:
+                    pass
+            await post_mod_log(interaction.guild,
+                f"🎰 **Gamble Token — Tails** — entire wolf den learned **{interaction.user.display_name}** is **{my_role}**.")
             await interaction.followup.send(
-                f"🎰 **Tails!** A random wolf has learned your role ({my_role}).\n"
-                f"The mod-log has a record of this.", ephemeral=True)
+                f"🎰 **Tails!** The entire wolf den now knows your role: **{my_role}**.\n"
+                f"*The mod-log has a record of this.*", ephemeral=True)
             await post_mod_log(interaction.guild,
                 f"🎰 **Gamble Token** — {interaction.user.display_name} rolled tails.\n"
                 f"Their role ({my_role}) was revealed to a random wolf.")
@@ -3970,6 +4003,45 @@ async def use_token(interaction: discord.Interaction, token_type: str):
         await interaction.followup.send(messages.get(token_type, "✅ Token activated."), ephemeral=True)
         await post_mod_log(interaction.guild,
             f"🎒 **Token used** — {interaction.user.display_name} activated **{TOKENS[token_type]['name']}**")
+
+
+class MagnetVoteTargetView(View):
+    """Step 2 of Magnet Token — choose who the forced voter must vote for."""
+    def __init__(self, guild_id, owner_id, voter_id, voter_name, guild=None):
+        super().__init__(timeout=120)
+        self.guild_id   = guild_id
+        self.owner_id   = owner_id
+        self.voter_id   = voter_id
+        self.voter_name = voter_name
+        rows  = db_get_assignments(guild_id)
+        alive = [r for r in rows if r[2] == 1 and r[0] != voter_id]
+        opts  = []
+        for r in alive[:25]:
+            m    = guild.get_member(r[0]) if guild else None
+            name = m.display_name[:80] if m else f"Player {r[0]}"
+            opts.append(discord.SelectOption(label=name, value=str(r[0])))
+        if opts:
+            sel = Select(
+                placeholder = f"🧲 Force {voter_name[:30]} to vote for...",
+                options     = opts)
+            sel.callback = self.on_select
+            self.add_item(sel)
+
+    async def on_select(self, interaction):
+        target_id   = int(interaction.data["values"][0])
+        target      = interaction.guild.get_member(target_id)
+        target_name = target.display_name if target else str(target_id)
+        db_use_token(self.guild_id, self.owner_id, "magnet")
+        await post_mod_log(interaction.guild,
+            f"🧲 **Magnet Token** — {interaction.user.display_name} used Magnet.\n"
+            f"⚠️ **{self.voter_name}** must vote for **{target_name}** today. Enforce manually.")
+        await interaction.response.edit_message(
+            content=(
+                f"🧲 **Magnet Token activated.**\n\n"
+                f"**{self.voter_name}** has been magnetically pulled toward **{target_name}**.\n"
+                f"*They must cast their vote for {target_name} today. The mod has been notified.*"
+            ),
+            view=None)
 
 
 class TokenTargetView(View):
@@ -4010,12 +4082,14 @@ class TokenTargetView(View):
                 "❌ Token already used.", ephemeral=True)
 
         if self.token_type == "peek":
-            team    = get_team(self.guild_id, next(
-                (r[1] for r in db_get_assignments(self.guild_id) if r[0] == target_id), ""))
-            is_wolf = team == "wolf"
+            rows    = db_get_assignments(self.guild_id)
+            t_row   = next((r for r in rows if r[0] == target_id), None)
+            t_role  = t_row[1] if t_row else "Unknown"
             await interaction.response.send_message(
-                f"🔍 **Peek result:** Is **{tname}** on the wolf team?\n"
-                f"**{'Yes 🐺' if is_wolf else 'No ✅'}**", ephemeral=True)
+                f"🔍 **Peek result:**\n"
+                f"**{tname}** is playing as **{t_role}**.", ephemeral=True)
+            await post_mod_log(interaction.guild,
+                f"🔍 **Peek Token** — {interaction.user.display_name} peeked **{tname}**: **{t_role}**")
 
         elif self.token_type == "shadow":
             # Store shadow target in DB state — resolved at next phase
@@ -4074,7 +4148,33 @@ class TokenTargetView(View):
                 f"↩️ **Redirect Token** — {interaction.user.display_name} wants to redirect a night action to **{tname}**.\n"
                 f"⚠️ Pick one player's submitted night action and change its target to {tname}.")
 
-        elif self.token_type == "bloodscent":
+        elif self.token_type == "save":
+            await interaction.response.send_message(
+                f"💊 **Save Token activated.** **{tname}** is protected from any kill tonight — "
+                f"wolf attack, witch poison, Wraith Kill Command, or any other source.\n"
+                f"*The mod has been notified.*",
+                ephemeral=True)
+            await post_mod_log(interaction.guild,
+                f"💊 **Save Token** — {interaction.user.display_name} is protecting **{tname}**.\n"
+                f"⚠️ {tname} cannot be killed tonight by ANY means — wolf, witch, Wraith, or otherwise.")
+
+        elif self.token_type == "silence":
+            await interaction.response.send_message(
+                f"🤫 **Silence Token activated.** **{tname}** must abstain from the next day vote.\n"
+                f"*The mod has been notified to enforce this.*",
+                ephemeral=True)
+            await post_mod_log(interaction.guild,
+                f"🤫 **Silence Token** — {interaction.user.display_name} silenced **{tname}**.\n"
+                f"⚠️ {tname} cannot vote today. Enforce manually.")
+
+        elif self.token_type == "magnet":
+            # Step 1 — chose who to force. Now need to pick their forced vote target
+            view2 = MagnetVoteTargetView(
+                self.guild_id, interaction.user.id, target_id, tname,
+                guild=interaction.guild)
+            await interaction.response.edit_message(
+                content=f"🧲 **Magnet Token — Step 2:**\nForcing **{tname}** to vote for who?",
+                view=view2)
             await interaction.response.send_message(
                 f"🩸 **Bloodscent Token activated.** You will learn at dawn which player "
                 f"the Seer, Medium, or Bloodhound investigated last night.\n"
@@ -4098,6 +4198,218 @@ class TokenTargetView(View):
                 f"🎒 **{TOKENS.get(self.token_type, {}).get('name', self.token_type)} used** — "
                 f"{interaction.user.display_name} → target: {tname}")
         self.stop()
+
+
+# ── Token Shop ────────────────────────────────────────────────────────────────
+
+def build_token_shop_embed() -> discord.Embed:
+    """Full token catalogue shown in the token shop channel at game start."""
+    embed = discord.Embed(
+        title       = "🪙 Token Shop — Wild Token Exchange",
+        description = (
+            "Have a **🃏 Wild Token**? Trade it here for any token of your choice.\n"
+            "**One trade per game. Open until the end of Day 1.**\n"
+            "Your choice is completely private — no one else sees what you pick.\n\n"
+            "*Don't have a Wild Token yet? Earn one by completing quests, "
+            "winning the Village Champion vote, or fulfilling your Grudge.*"
+        ),
+        color = 0xF39C12
+    )
+
+    # Group tokens by category
+    village_tokens = {
+        "guardian":    TOKENS["guardian"],
+        "peek":        TOKENS["peek"],
+        "double_vote": TOKENS["double_vote"],
+        "skip_night":  TOKENS["skip_night"],
+        "save":        TOKENS["save"],
+        "silence":     TOKENS["silence"],
+        "magnet":      TOKENS["magnet"],
+        "pardon":      TOKENS["pardon"],
+        "broadcast":   TOKENS["broadcast"],
+        "gamble":      TOKENS["gamble"],
+        "mirror":      TOKENS["mirror"],
+        "shadow":      TOKENS["shadow"],
+        "swap":        TOKENS["swap"],
+        "decoy":       TOKENS["decoy"],
+    }
+    wolf_tokens = {
+        "frame":       TOKENS["frame"],
+        "vanish":      TOKENS["vanish"],
+        "redirect":    TOKENS["redirect"],
+        "alibi":       TOKENS["alibi"],
+        "bloodscent":  TOKENS["bloodscent"],
+    }
+
+    village_lines = "\n".join(
+        f"{t['emoji']} **{t['name']}** — {t['desc']}"
+        for t in village_tokens.values()
+    )
+    wolf_lines = "\n".join(
+        f"{t['emoji']} **{t['name']}** — {t['desc']}"
+        for t in wolf_tokens.values()
+    )
+
+    embed.add_field(
+        name   = "🏘️ Village Tokens",
+        value  = village_lines,
+        inline = False
+    )
+    embed.add_field(
+        name   = "🐺 Wolf Tokens",
+        value  = wolf_lines + "\n\n*Wolf tokens can be used by anyone — use wisely.*",
+        inline = False
+    )
+    embed.set_footer(text="Click 🃏 Trade Wild Token below to make your exchange.")
+    return embed
+
+
+class TokenShopView(View):
+    """
+    Persistent view in the token shop channel.
+    Players with a Wild Token click to trade it for any token they choose.
+    Completely private — response is ephemeral.
+    Closes at end of Day 1.
+    """
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+
+        btn = Button(
+            label     = "🃏 Trade Wild Token",
+            style     = discord.ButtonStyle.primary,
+            custom_id = f"token_shop_{guild_id}"
+        )
+        btn.callback = self.on_trade
+        self.add_item(btn)
+
+    async def on_trade(self, interaction: discord.Interaction):
+        guild_id  = self.guild_id
+        player_id = interaction.user.id
+
+        # Check shop is still open
+        state = cached_get_state(guild_id) or {}
+        if not state.get("token_shop_open", 1):
+            return await interaction.response.send_message(
+                "❌ **The token shop is closed.** Trading was only available until the end of Day 1.",
+                ephemeral=True)
+
+        # Check player has an untraded Wild Token
+        tokens = db_get_player_tokens(guild_id, player_id)
+        has_wild = any(t == "wild" and not used for t, used in tokens)
+        if not has_wild:
+            return await interaction.response.send_message(
+                "❌ You don't have an unused **🃏 Wild Token** to trade.\n"
+                "*Earn one by completing quests, winning Village Champion, or fulfilling your Grudge.*",
+                ephemeral=True)
+
+        # Check not already traded this game
+        conn = sqlite3.connect(DB_FILE)
+        c    = conn.cursor()
+        c.execute("SELECT new_token FROM token_shop_trades WHERE guild_id=? AND player_id=?",
+                  (guild_id, player_id))
+        already = c.fetchone()
+        conn.close()
+        if already:
+            chosen = TOKENS.get(already[0], {})
+            return await interaction.response.send_message(
+                f"✅ You already traded your Wild Token this game for a "
+                f"**{chosen.get('emoji','')} {chosen.get('name', already[0])}**.",
+                ephemeral=True)
+
+        # Show token picker — all 19 non-wild tokens
+        all_tradeable = [k for k in TOKENS if k != "wild"]
+        # Split into two dropdowns (max 25 each)
+        view = TokenShopPickerView(guild_id, player_id, all_tradeable)
+        await interaction.response.send_message(
+            "🪙 **Choose your token:**\n"
+            "*Your selection is completely private. No one else will see what you pick.*",
+            view=view,
+            ephemeral=True)
+
+
+class TokenShopPickerView(View):
+    """Two-dropdown token picker — private, ephemeral."""
+    def __init__(self, guild_id: int, player_id: int, token_keys: list):
+        super().__init__(timeout=120)
+        self.guild_id  = guild_id
+        self.player_id = player_id
+
+        half1 = token_keys[:10]
+        half2 = token_keys[10:]
+
+        opts1 = [discord.SelectOption(
+            label       = f"{TOKENS[k]['emoji']} {TOKENS[k]['name']}",
+            value       = k,
+            description = TOKENS[k]['desc'][:100]
+        ) for k in half1]
+
+        opts2 = [discord.SelectOption(
+            label       = f"{TOKENS[k]['emoji']} {TOKENS[k]['name']}",
+            value       = k,
+            description = TOKENS[k]['desc'][:100]
+        ) for k in half2]
+
+        sel1 = Select(placeholder="🪙 Choose a token (1 of 2)...", options=opts1, row=0)
+        sel2 = Select(placeholder="🪙 Choose a token (2 of 2)...", options=opts2, row=1)
+        sel1.callback = self.on_select
+        sel2.callback = self.on_select
+        self.add_item(sel1)
+        self.add_item(sel2)
+
+    async def on_select(self, interaction: discord.Interaction):
+        import time as _t
+        chosen_key = interaction.data["values"][0]
+        guild_id   = self.guild_id
+        player_id  = self.player_id
+        chosen     = TOKENS.get(chosen_key, {})
+
+        # Double-check still eligible
+        state = cached_get_state(guild_id) or {}
+        if not state.get("token_shop_open", 1):
+            return await interaction.response.edit_message(
+                content="❌ The shop closed while you were choosing. Trade cancelled.",
+                view=None)
+
+        conn = sqlite3.connect(DB_FILE)
+        c    = conn.cursor()
+        c.execute("SELECT new_token FROM token_shop_trades WHERE guild_id=? AND player_id=?",
+                  (guild_id, player_id))
+        already = c.fetchone()
+        conn.close()
+        if already:
+            return await interaction.response.edit_message(
+                content="❌ You already made a trade this game.", view=None)
+
+        # Use the Wild Token
+        db_use_token(guild_id, player_id, "wild")
+
+        # Award the chosen token
+        db_award_token(guild_id, player_id, chosen_key)
+
+        # Record the trade
+        conn = sqlite3.connect(DB_FILE)
+        c    = conn.cursor()
+        c.execute("INSERT OR REPLACE INTO token_shop_trades VALUES (?,?,?,?,?)",
+                  (guild_id, player_id, "wild", chosen_key, int(_t.time())))
+        conn.commit()
+        conn.close()
+
+        # Notify mod privately
+        await post_mod_log(interaction.guild,
+            f"🪙 **Token Shop Trade**\n"
+            f"**{interaction.user.display_name}** traded their Wild Token for "
+            f"**{chosen.get('emoji','')} {chosen.get('name', chosen_key)}**")
+
+        await interaction.response.edit_message(
+            content=(
+                f"✅ **Trade complete!**\n\n"
+                f"You exchanged your 🃏 Wild Token for:\n"
+                f"{chosen.get('emoji','')} **{chosen.get('name', chosen_key)}**\n\n"
+                f"*{chosen.get('desc', '')}*\n\n"
+                f"Use `/my_tokens` to see your full token inventory."
+            ),
+            view=None)
 
 
 class WildTokenView(View):
@@ -5975,6 +6287,28 @@ async def _run_start_day(guild, guild_id, night_num, state):
     # Chaos Gremlin day vote spin
     safe_task(_spin_chaos_gremlin_day_vote(guild, guild_id, night_num), "chaos_gremlin_day")
 
+    # ── Close token shop at start of Day 2 ───────────────────────────────
+    if night_num >= 2:
+        state_ts = cached_get_state(guild_id) or {}
+        if state_ts.get("token_shop_open", 1):
+            db_set_state(guild_id, token_shop_open=0)
+            shop_ch_id = state_ts.get("token_shop_ch_id")
+            shop_ch    = guild.get_channel(shop_ch_id) if shop_ch_id else None
+            if shop_ch:
+                try:
+                    closed_embed = discord.Embed(
+                        title       = "🔒 Token Shop — Closed",
+                        description = (
+                            "The token shop is now closed.\n"
+                            "Trading was available until the end of Day 1.\n\n"
+                            "*Tokens earned during the game can still be used with `/use_token`.*"
+                        ),
+                        color = 0x95A5A6
+                    )
+                    await shop_ch.send(embed=closed_embed)
+                except Exception as e:
+                    print(f"[token_shop] close message error: {e}")
+
     # ── Day phase checklist → mod-log ─────────────────────────────────────
     state_dl  = cached_get_state(guild_id) or {}
     mod_ch_dl = guild.get_channel(state_dl.get("mod_log_channel_id") or 0)
@@ -6051,6 +6385,12 @@ async def _run_start_day(guild, guild_id, night_num, state):
             if not priv_ch:
                 continue
             surge_uses = db_get_ability_uses(guild_id, r[0] + 1000000)
+
+            # Jafar gets 2 Double Choice uses — initialize on first day
+            if r[1] == "Jafar" and surge_uses is None:
+                db_init_ability_uses(guild_id, r[0] + 1000000, "surge", 2)
+                surge_uses = 2
+
             if surge_uses is not None and surge_uses <= 0:
                 continue  # Already used — don't clutter channel
             view = VillageSurgeDayView(guild_id, r[0], r[1], alive_members)
@@ -6278,16 +6618,16 @@ async def _assign_bounties(guild, guild_id: int):
             ("seer_survive_day3",   "Survive to Day 3 without being eliminated."),
         ],
         "Doctor": [
-            ("doctor_save_night1",  "Successfully use your save on Night 1."),
-            ("doctor_save_attacked","Save a player from a wolf kill successfully."),
-            ("doctor_survive_day3", "Survive to Day 3."),
-            ("doctor_save_3",       "Use your save ability 3 separate nights."),
+            ("doctor_save_attacked", "Save a player from a wolf kill successfully."),
+            ("doctor_save_night1",   "Use your save on Night 1."),
+            ("doctor_survive_day3",  "Survive to Day 3."),
+            ("doctor_never_voted",   "Never be the top vote recipient on any day."),
         ],
         "Surgeon": [
-            ("surgeon_save_1",      "Successfully use a save at least once."),
-            ("surgeon_save_3",      "Use all 3 of your saves in a single game."),
-            ("surgeon_survive_day3","Survive to Day 3."),
-            ("surgeon_save_targeted","Save a player the wolves had targeted on a previous night."),
+            ("surgeon_save_2",       "Use your save ability on 2 separate nights."),
+            ("surgeon_save_attacked","Save a player from a wolf kill successfully."),
+            ("surgeon_survive_day3", "Survive to Day 3."),
+            ("surgeon_use_all",      "Use all 3 of your saves across the game."),
         ],
         "Huntsman": [
             ("huntsman_guard_attacked","Guard a player on the night they are attacked."),
@@ -6374,10 +6714,10 @@ async def _assign_bounties(guild, guild_id: int):
             ("drunk_outlast_half",  "Outlast at least half the starting players."),
         ],
         "Pothead": [
-            ("pothead_munchies",    "Be killed by wolves triggering the munchies second kill."),
-            ("pothead_survive_day3","Survive to Day 3."),
-            ("pothead_never_voted", "Never be the top vote recipient on any day."),
-            ("pothead_final5",      "Still be alive in the final 5 players."),
+            ("pothead_survive_day3", "Survive to Day 3."),
+            ("pothead_never_voted",  "Never be the top vote recipient on any day."),
+            ("pothead_final5",       "Still be alive in the final 5 players."),
+            ("pothead_outlast_half", "Outlast at least half the starting players."),
         ],
         "Flirt": [
             ("flirt_survive_day3",      "Survive to Day 3 without breaking your speech rule."),
@@ -6458,15 +6798,15 @@ async def _assign_bounties(guild, guild_id: int):
             ("witch_survive_day3",  "Survive to Day 3."),
         ],
         "Oracle": [
-            ("oracle_3_nights",     "Use your crystal ball 3 nights in a row."),
+            ("oracle_3_nights",     "Consult the crystal ball 3 nights in a row."),
             ("oracle_survive_day3", "Survive to Day 3."),
-            ("oracle_correct_3",    "Receive 3 correct answers that contribute to wolf eliminations."),
             ("oracle_never_voted",  "Never be the top vote recipient on any day."),
+            ("oracle_final5",       "Still be alive in the final 5 players."),
         ],
         "Warlock": [
-            ("warlock_grant_wish",  "Successfully grant a wish and eliminate a player in the process."),
+            ("warlock_grant_wish",  "Successfully grant a wish this game."),
+            ("warlock_swap_wolf",   "Grant a wish that places a wolf into a village role."),
             ("warlock_survive_day3","Survive to Day 3."),
-            ("warlock_never_voted", "Never be the top vote recipient on any day."),
             ("warlock_final5",      "Still be alive in the final 5 players."),
         ],
         "Fairy Elf": [
@@ -6597,8 +6937,8 @@ async def _assign_bounties(guild, guild_id: int):
 
 async def _check_bounty_completion(guild, guild_id: int):
     """Called at assign_victors — checks all bounties and awards tokens."""
-    rows     = db_get_assignments(guild_id)
-    elim_log = db_get_elimination_log(guild_id)
+    rows      = db_get_assignments(guild_id)
+    elim_log  = db_get_elimination_log(guild_id)
     vote_hist = db_get_vote_history(guild_id)
 
     # Who changed their vote?
@@ -6616,9 +6956,18 @@ async def _check_bounty_completion(guild, guild_id: int):
         if elim_type in ("wolf_kill", "werekitten", "shadow_wolf", "white_wolf"):
             wolf_killed_roles.add(role_n)
 
+    # Message counts for 150 quest
+    msg_counts = {c[0]: c[1] for c in db_get_message_counts(guild_id)}
+
+    # Who survived?
+    survivor_ids = {r[0] for r in rows if r[2] == 1}
+
+    # Eliminated IDs
+    eliminated_ids = {r[0] for r in rows if r[2] == 0}
+
     winners = []
     for r in rows:
-        pid     = r[0]
+        pid      = r[0]
         bounties = db_get_bounties(guild_id, pid)
         for bounty_type, target_id, target_role, completed in bounties:
             if completed:
@@ -6632,28 +6981,61 @@ async def _check_bounty_completion(guild, guild_id: int):
             elif bounty_type == "keep_alive_day3" and target_id not in died_before_day3:
                 earned = True
             elif bounty_type == "send_150_messages":
-                msg_counts = {c[0]: c[1] for c in db_get_message_counts(guild_id)}
                 if msg_counts.get(pid, 0) >= 150:
                     earned = True
+            elif bounty_type == "breadcrumbs":
+                # Breadcrumbs is self-completing via button click — skip here
+                continue
+            elif bounty_type in ("survive_to_day3", "flirt_survive_day3",
+                                 "jafar_survive_day3", "lycan_survive_day3"):
+                night_num = db_get_night_num(guild_id)
+                if night_num >= 3 and pid in survivor_ids:
+                    earned = True
+            elif bounty_type in ("never_voted", "flirt_never_voted", "jafar_never_voted",
+                                 "vj_never_voted"):
+                voted_against = {v[2] for v in vote_hist if v[1] == pid}
+                earned = len(voted_against) == 0
+            elif bounty_type in ("outlast_half", "flirt_outlast_half"):
+                total   = len(rows)
+                alive   = len(survivor_ids)
+                earned  = pid in survivor_ids and alive <= total // 2
+            elif bounty_type in ("final5", "flirt_final5", "jafar_final5",
+                                 "vj_final5", "lycan_final5"):
+                earned = pid in survivor_ids and len(survivor_ids) <= 5
+            elif bounty_type == "survive_game":
+                earned = pid in survivor_ids
+            elif bounty_type in ("win_as_wolf", "win_as_village", "win_as_neutral"):
+                # These are handled by the winning_team param — skip, award separately
+                continue
 
             if earned:
                 db_complete_bounty(guild_id, pid, bounty_type)
-                db_award_token(guild_id, pid, "wild")  # Award a Wild token
+                db_award_token(guild_id, pid, "wild")
                 winners.append((pid, bounty_type))
 
                 # Notify in private channel
                 priv_row = next((row for row in rows if row[0] == pid), None)
                 priv_ch  = guild.get_channel(priv_row[3]) if priv_row and len(priv_row) > 3 else None
                 if priv_ch:
-                    m = guild.get_member(pid)
                     label = {
-                        "wolf_kill_role":    f"A {target_role} was wolf-killed ✅",
-                        "never_change_vote": "You never changed your vote ✅",
-                        "keep_alive_day3":   "Your protected player survived to Day 3 ✅",
-                    }.get(bounty_type, bounty_type)
+                        "wolf_kill_role":      f"A {target_role} was wolf-killed ✅",
+                        "never_change_vote":   "You never changed your vote ✅",
+                        "keep_alive_day3":     "Your protected player survived to Day 3 ✅",
+                        "send_150_messages":   "You sent 150 messages in village-chat ✅",
+                        "survive_to_day3":     "You survived to Day 3 ✅",
+                        "flirt_survive_day3":  "You survived to Day 3 without breaking your speech rule ✅",
+                        "jafar_survive_day3":  "You survived to Day 3 ✅",
+                        "never_voted":         "You were never the top vote recipient ✅",
+                        "flirt_never_voted":   "You were never the top vote recipient ✅",
+                        "outlast_half":        "You outlasted at least half the players ✅",
+                        "flirt_outlast_half":  "You outlasted at least half the players ✅",
+                        "final5":              "You made it to the final 5 ✅",
+                        "flirt_final5":        "You made it to the final 5 ✅",
+                        "survive_game":        "You survived the entire game ✅",
+                    }.get(bounty_type, f"{bounty_type} ✅")
                     try:
                         await priv_ch.send(
-                            f"🎯 **Bounty/Quest Complete!**\n{label}\n"
+                            f"🎯 **Quest Complete!**\n{label}\n"
                             f"You've been awarded a **🃏 Wild Token** for the next game!")
                     except Exception:
                         pass
@@ -8806,18 +9188,18 @@ ROLE_IMAGES = {
 # All available token types with descriptions and effects
 TOKENS = {
     "guardian":     {"emoji": "🛡️",  "name": "Guardian Token",      "desc": "One-time protection from a wolf kill. Fires automatically the night you would have died."},
-    "peek":         {"emoji": "🔍",  "name": "Peek Token",           "desc": "Ask the bot one yes/no question: Is [player] on the wolf team? Answer sent privately."},
+    "peek":         {"emoji": "🔍",  "name": "Peek Token",           "desc": "Learn the exact role of any one player. Answer sent privately to you only."},
     "double_vote":  {"emoji": "🎯",  "name": "Double Vote Token",    "desc": "Your vote counts twice for one day. Declare it when casting your vote."},
     "skip_night":   {"emoji": "🌙",  "name": "Skip Night Token",     "desc": "Wolves cannot target you tonight. Declare before night ends."},
-    "save":         {"emoji": "💊",  "name": "Save Token",           "desc": "Protect any player of your choosing from the next wolf kill."},
+    "save":         {"emoji": "💊",  "name": "Save Token",           "desc": "Protect any player of your choosing from any kill — wolf attack, witch poison, Wraith Kill Command, or any other source."},
     "silence":      {"emoji": "🤫",  "name": "Silence Token",        "desc": "Force one player to abstain from the next day vote. Mod executes it."},
-    "reveal":       {"emoji": "🎭",  "name": "Reveal Token",         "desc": "Force one player to publicly confirm whether they are village or wolf-aligned."},
+    "magnet":       {"emoji": "🧲",  "name": "Magnet Token",         "desc": "Force one player to vote for a specific person today. You choose both the voter and their target. Mod executes it privately."},
     "swap":         {"emoji": "🌀",  "name": "Swap Token",           "desc": "All roles in the game are randomly reshuffled among alive players. Everyone wakes up as someone new. Complete chaos."},
     "decoy":        {"emoji": "🎪",  "name": "Decoy Token",          "desc": "For one night you secretly choose the wolf kill target instead of the den. The den believes they chose normally."},
     "shadow":       {"emoji": "🕵️",  "name": "Shadow Token",         "desc": "Follow one player for one night. You learn every action taken against them and by them. Full report delivered at dawn."},
     "pardon":       {"emoji": "🕊️",  "name": "Pardon Token",         "desc": "If you receive the most votes today you are spared. Second highest is eliminated instead."},
     "broadcast":    {"emoji": "📣",  "name": "Broadcast Token",      "desc": "Send one anonymous message to all of village-chat. No name attached."},
-    "gamble":       {"emoji": "🎰",  "name": "Gamble Token",         "desc": "Flip a coin. Heads: you learn one wolf's name. Tails: one wolf learns your role."},
+    "gamble":       {"emoji": "🎰",  "name": "Gamble Token",         "desc": "Flip a coin. Heads: you learn one wolf's name privately. Tails: the entire wolf den learns your role."},
     "mirror":       {"emoji": "🪞",  "name": "Mirror Token",         "desc": "If you are wolf-killed tonight, the kill bounces back and eliminates the wolf who chose you."},
     "wild":         {"emoji": "🃏",  "name": "Wild Token",           "desc": "Mystery box — you pick any token from the full list after opening it."},
     # Wolf-friendly tokens
@@ -9411,7 +9793,7 @@ SURGE_SECONDARIES = {
     "Drunk":           "**Gif Day** — Force everyone in village-chat to communicate only in gifs for one full day.",
     "Pothead":         "**Munchies** — Be completely immune to all night actions for one night.",
     "Flirt":           "**Innuendo Day** — Force everyone in village-chat to speak in flirty innuendo for one full day.",
-    "Jafar":           "**Reroll** — Reroll your morning ability once. Receive a new random ability instead.",
+    "Jafar":           "**Double Choice** — Twice per game, instead of receiving a random morning ability you choose which village role ability you want for the day.",
     "Lycan":           "**Wolf Sense** — Your wolf nature recognizes another. Learn the identity of one wolf privately.",
     "Time Lord":       "**Full Rewind** — Reset the last 24 hours entirely, including all deaths. Everyone who died returns.",
     "Village Idiot":   "**Typo Day** — Force all players to speak in typos for one full day.",
@@ -9422,8 +9804,8 @@ SURGE_SECONDARIES = {
     "Diseased":        "**Vengeance** — The wolf who kills you also dies that same night.",
     # Neutral
     "Witch":           "**Third Potion** — A confusion potion that redirects one player's night action to a random different target.",
-    "Oracle":          "**False Prophecy** — Deliver one deliberately incorrect yes/no result to any player who asks.",
-    "Warlock":         "**Frame** — Make one player appear wolf-aligned to all investigations for one night.",
+    "Oracle":          "**Prophecy** — Once per game, prophesy which player will die tonight. Submit privately. If correct, Oracle is declared among the winners regardless of which team wins.",
+    "Warlock":         "**Soul Swap** — Once per game, permanently swap the roles of any two alive players. Can include yourself. Neither player is notified — the mod sends new role cards.",
     "Fairy Elf":       "**Wish** — Grant one player a random token from the pool. Neither of you knows what it is until used.",
     "Wraith":          "**Remark** — Once per game, either Wraith can remove a mark from a dead player and reapply it to an alive player instead.",
     "Chaos Gremlin":   "**Wild Spin** — Spin the wheel a second time for a bonus night ability on top of your regular spin.",
@@ -10118,8 +10500,8 @@ class VoteResultsView(View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     async def on_browse(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
         guild_id = self.guild_id or interaction.guild_id
-        # Get all days that have vote history
         conn = sqlite3.connect(DB_FILE)
         c    = conn.cursor()
         c.execute(
@@ -10129,16 +10511,15 @@ class VoteResultsView(View):
         conn.close()
 
         if not days:
-            return await interaction.response.send_message(
+            return await interaction.followup.send(
                 "No vote history recorded yet.", ephemeral=True)
 
-        # Build a select menu of available days
         options = [
             discord.SelectOption(label=f"Day {d}", value=str(d))
             for d in days[:25]
         ]
         view = VoteDaySelectView(guild_id, options)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "Select a day to view its full vote results:",
             view=view, ephemeral=True)
 
@@ -12461,6 +12842,19 @@ class ConfirmStartView(View):
         if spec_role: ghost_ow[spec_role] = read_ow
         ghost_ch = await category.create_text_channel(ch_name_themed("ghost-chat",   font, "👻", disney=disney, hp=hp, greek=greek), overwrites=ghost_ow)
 
+        # token-shop — visible to all participants, read-only except for bot interactions
+        shop_ow = {
+            everyone: discord.PermissionOverwrite(view_channel=False),
+            bot_me:   bot_ow,
+        }
+        if p_role:    shop_ow[p_role]    = discord.PermissionOverwrite(view_channel=True, send_messages=False)
+        if dead_role: shop_ow[dead_role] = discord.PermissionOverwrite(view_channel=True, send_messages=False)
+        if spec_role: shop_ow[spec_role] = discord.PermissionOverwrite(view_channel=True, send_messages=False)
+        if mod_role:  shop_ow[mod_role]  = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+        shop_ch = await category.create_text_channel(
+            ch_name_themed("token-shop", font, "🪙", disney=disney, hp=hp, greek=greek),
+            overwrites=shop_ow)
+
         # wraith-den — only if Wraiths are in the game
         wraith_players = [p for p in players if assignments.get(p.id) == "Wraith"]
         wraith_ch      = None
@@ -12932,6 +13326,7 @@ class ConfirmStartView(View):
             village_chat_ch_id=village_chat_ch.id,
             win_tracker_ch_id=win_tracker_ch.id,
             spec_qa_ch_id=spec_qa_ch.id,
+            token_shop_ch_id=shop_ch.id,
             mod_dashboard_msg_id=None,
             night_bb_done=0,
             day_bb_done=0,
@@ -12945,8 +13340,13 @@ class ConfirmStartView(View):
             ability_surge=1 if surge else 0
         )
 
-        # Timeline embed
-        fresh_state = cached_get_state(interaction.guild_id)
+        # Token Shop — post the shop embed with all tokens and Wild Token exchange button
+        try:
+            shop_embed = build_token_shop_embed()
+            shop_view  = TokenShopView(interaction.guild_id)
+            await shop_ch.send(embed=shop_embed, view=shop_view)
+        except Exception as e:
+            print(f"[token_shop] post error: {e}")
         tl_msg = await timeline_ch.send(embed=build_timeline_embed(interaction.guild_id, fresh_state))
         db_set_state(interaction.guild_id, timeline_msg_id=tl_msg.id)
 
@@ -13264,6 +13664,35 @@ async def end_game(interaction: discord.Interaction):
 
         # Blood Board channel is inside the game category — deleted with it
         # No separate purge needed
+
+        # ── Remove game roles from all members ───────────────────────────
+        try:
+            state_er         = db_get_state(interaction.guild_id) or {}
+            participant_rid  = state_er.get("participant_role_id")
+            dead_rid         = state_er.get("dead_role_id")
+            spectator_rid    = state_er.get("spectator_role_id")
+
+            roles_to_remove = []
+            if participant_rid:
+                r = interaction.guild.get_role(participant_rid)
+                if r: roles_to_remove.append(r)
+            if dead_rid:
+                r = interaction.guild.get_role(dead_rid)
+                if r: roles_to_remove.append(r)
+            if spectator_rid:
+                r = interaction.guild.get_role(spectator_rid)
+                if r: roles_to_remove.append(r)
+
+            if roles_to_remove:
+                for member in interaction.guild.members:
+                    member_roles = [r for r in roles_to_remove if r in member.roles]
+                    if member_roles:
+                        try:
+                            await member.remove_roles(*member_roles, reason="Game ended")
+                        except Exception as e:
+                            print(f"[end_game] Could not remove roles from {member}: {e}")
+        except Exception as e:
+            print(f"[end_game] Role removal error: {e}")
 
         db_clear_state(interaction.guild_id)
         db_clear_tokens(interaction.guild_id)
@@ -16188,7 +16617,7 @@ async def _run_elimination(guild, interaction, player, role_name, public, assign
             priv_ch = guild.get_channel(jokester_row[3])
             if priv_ch:
                 # Patch options with real display names
-                view = JokesterKillView(guild.id, player.id, voter_ids)
+                view = JokesterKillView(guild.id, player.id, voter_ids, guild=guild)
                 if hasattr(view, "children") and view.children:
                     sel = view.children[0]
                     if hasattr(sel, "options"):
@@ -16907,20 +17336,22 @@ async def _eliminate_player(guild: discord.Guild, player_id: int, reason: str):
 # ====================== WIN CONDITION ======================
 # Neutral win conditions — checked separately after main win check
 NEUTRAL_WIN_CONDITIONS = {
-    # Witch wins if both potions used AND alive at game end
+    # Witch — use both potions AND survive to end → join winning team
     "Witch": lambda rows, guild_id: (
         any(r[1] == "Witch" and r[2] == 1 for r in rows) and
         _witch_both_potions_used(guild_id)),
-    # Oracle wins if they survived to Night 4 or beyond
+    # Oracle — alive at game end → join winning team (surge prophecy gives independent win)
     "Oracle": lambda rows, guild_id: (
-        bool((db_get_state(guild_id) or {}).get("oracle_prophecy_correct", 0))),
-    # Warlock wins if alive at game end
-    "Warlock": lambda rows, guild_id: any(
-        r[1] == "Warlock" and r[2] == 1 for r in rows),
-    # Fairy Elf wins if alive at game end
-    "Fairy Elf": lambda rows, guild_id: any(
-        r[1] == "Fairy Elf" and r[2] == 1 for r in rows),
-    # Chaos Gremlin wins if alive at game end — independent of winning team
+        any(r[1] == "Oracle" and r[2] == 1 for r in rows)),
+    # Warlock — grant their wish AND survive to end → join winning team
+    "Warlock": lambda rows, guild_id: (
+        any(r[1] == "Warlock" and r[2] == 1 for r in rows) and
+        bool((db_get_state(guild_id) or {}).get("warlock_swap_used", 0))),
+    # Fairy Elf — use revive ability AND survive to end → join winning team
+    "Fairy Elf": lambda rows, guild_id: (
+        any(r[1] == "Fairy Elf" and r[2] == 1 for r in rows) and
+        bool((db_get_state(guild_id) or {}).get("fairy_elf_revived", 0))),
+    # Chaos Gremlin — survive to end → win independently regardless of which team wins
     "Chaos Gremlin": lambda rows, guild_id: any(
         r[1] == "Chaos Gremlin" and r[2] == 1 for r in rows),
 }
@@ -16933,7 +17364,7 @@ async def check_win_condition(guild):
     alive_wolves  = [r for r in alive_roles if get_team(guild_id, r) == "wolf"]
     alive_village = [r for r in alive_roles if get_team(guild_id, r) == "village"]
 
-    # ── Wraith win condition ─────────────────────────────────────────────
+    # ── Wraith win condition — checked first, highest priority ────────────
     wraith_players = [(r[0], r[2]) for r in rows if r[1] == "Wraith"]
     if wraith_players:
         alive_wraiths = [p for p, alive in wraith_players if alive]
@@ -16946,12 +17377,7 @@ async def check_win_condition(guild):
                 wraith_names   = ", ".join(m.display_name for m in wraith_members if m)
                 return f"wraith|{wraith_names}"
 
-    # Check neutral individual wins first
-    for role_name, condition in NEUTRAL_WIN_CONDITIONS.items():
-        if any(r[1] == role_name for r in alive_rows):
-            if condition(rows, guild.id):
-                pass  # Neutral may still win even if main game ends
-
+    # ── Main team win conditions ──────────────────────────────────────────
     if len(alive_wolves) == 0:                  return "village"
     if len(alive_wolves) >= len(alive_village): return "wolf"
     return None
@@ -17044,8 +17470,17 @@ async def announce_win(guild, winner: str):
         loser_msg   = f"💀 **Your team lost.** {winner.capitalize()} emerged victorious."
 
     if neutral_winners:
-        neutral_lines = ", ".join(f"**{n}** ({r})" for n, r in neutral_winners)
-        public_msg += f"\n⚖️ **{neutral_team} winners:** {neutral_lines}"
+        # Split into "join winning team" vs "win independently"
+        independent_roles = {"Chaos Gremlin", "Wraith"}
+        joiners     = [(n, r) for n, r in neutral_winners if r not in independent_roles]
+        independents = [(n, r) for n, r in neutral_winners if r in independent_roles]
+
+        if joiners:
+            joiner_lines = ", ".join(f"**{n}** ({r})" for n, r in joiners)
+            public_msg += f"\n⚖️ **Also victorious — joined the winning team:** {joiner_lines}"
+        if independents:
+            indep_lines = ", ".join(f"**{n}** ({r})" for n, r in independents)
+            public_msg += f"\n🌀 **Independent winners:** {indep_lines}"
 
     # Post to village chat with themed win message
     state2   = cached_get_state(guild.id)
@@ -17395,12 +17830,40 @@ async def assign_victors(interaction: discord.Interaction, winning_team: str):
     winner_pids = [r[0] for r in rows if effective_team(r[0], r[1]) == winning_team]
     dead_pids   = [r[0] for r in rows if r[2] == 0]
 
-    db_update_stats(guild_id, all_pids, winner_pids, dead_pids)
+    # ── Neutral win conditions — checked independently of winning team ────
+    # These players win alongside the main team, not instead of them
+    neutral_win_pids = []
+    for role_name, condition in NEUTRAL_WIN_CONDITIONS.items():
+        try:
+            if condition(rows, guild_id):
+                for r in rows:
+                    if r[1] == role_name and r[0] not in winner_pids:
+                        neutral_win_pids.append(r[0])
+        except Exception as e:
+            print(f"[assign_victors] neutral win check error for {role_name}: {e}")
+
+    # Wraith — check separately since condition is more complex
+    try:
+        wraith_rows = [r for r in rows if r[1] == "Wraith" and r[2] == 1]
+        if wraith_rows:
+            v_alive = sum(1 for r in rows if r[2] == 1 and get_team(guild_id, r[1]) == "village")
+            w_alive = sum(1 for r in rows if r[2] == 1 and get_team(guild_id, r[1]) == "wolf")
+            if len(wraith_rows) >= v_alive and len(wraith_rows) >= w_alive:
+                for r in wraith_rows:
+                    if r[0] not in winner_pids and r[0] not in neutral_win_pids:
+                        neutral_win_pids.append(r[0])
+    except Exception as e:
+        print(f"[assign_victors] wraith win check error: {e}")
+
+    # Combined winner list for stats — main team + neutral winners
+    all_winner_pids = list(set(winner_pids + neutral_win_pids))
+
+    db_update_stats(guild_id, all_pids, all_winner_pids, dead_pids)
 
     # Record role history — use effective team so stats reflect what actually happened
     for pid, role_name, is_alive, _ in rows:
         team    = effective_team(pid, role_name)
-        outcome = "win" if pid in winner_pids else "loss"
+        outcome = "win" if pid in all_winner_pids else "loss"
         db_record_role_history(guild_id, pid, role_name, team, outcome)
 
     winner_names = []
@@ -17411,12 +17874,23 @@ async def assign_victors(interaction: discord.Interaction, winning_team: str):
         elif pid == traitor_pid:   name += " *(switched)*"
         winner_names.append(name)
 
+    # Add neutral winners to mod-log notification
+    neutral_winner_names = []
+    for pid in neutral_win_pids:
+        m    = interaction.guild.get_member(pid)
+        name = m.display_name if m else str(pid)
+        r    = next((r for r in rows if r[0] == pid), None)
+        role = r[1] if r else "Neutral"
+        neutral_winner_names.append(f"{name} ({role})")
+
     await log_event(interaction.guild, "End",
                     f"🏆 **{winning_team.capitalize()}** declared winners. "
                     f"Winners: {', '.join(winner_names)}")
+    neutral_note = f"\n⚖️ Neutral winners: {', '.join(neutral_winner_names)}" if neutral_winner_names else ""
     await post_mod_log(interaction.guild,
         f"🏆 **{winning_team.capitalize()} wins** recorded.\n"
-        f"Winners ({len(winner_pids)}): {', '.join(winner_names)}")
+        f"Winners ({len(winner_pids)}): {', '.join(winner_names)}"
+        + neutral_note)
     # Auto-refresh hall of fame and stats channel
     await refresh_hall_of_fame(interaction.guild)
     state     = cached_get_state(interaction.guild_id)
@@ -17455,7 +17929,7 @@ async def assign_victors(interaction: discord.Interaction, winning_team: str):
     for pid, role_name, is_alive, _ in rows:
         team       = effective_team(pid, role_name)
         alive_icon = "✅" if is_alive else "💀"
-        winner_icon = "🏆 " if pid in winner_pids else ""
+        winner_icon = "🏆 " if pid in all_winner_pids else ""
         turned_note = " *(turned)*" if pid in turned_pids else ""
         traitor_note = " *(switched)*" if pid == traitor_pid else ""
         by_team.setdefault(team, []).append(
@@ -17686,7 +18160,7 @@ async def assign_victors(interaction: discord.Interaction, winning_team: str):
 
         # ── Hot Streak Callouts ───────────────────────────────────────────
         streak_lines = []
-        for pid in winner_pids:
+        for pid in all_winner_pids:
             streak = db_get_hot_streak(guild_id, pid)
             if streak >= 3:
                 m    = interaction.guild.get_member(pid)
@@ -17744,9 +18218,20 @@ async def assign_victors(interaction: discord.Interaction, winning_team: str):
         # ── Clean up ──────────────────────────────────────────────────────
         db_clear_bounties(guild_id)
 
-    reveal_note = f"Role reveal posted to {reveal_ch.mention}." if reveal_ch else "⚠️ No channel found for role reveal."
+        # ── Refresh player list and mod dashboard ─────────────────────────
+        try:
+            await refresh_player_list(interaction.guild)
+        except Exception as e:
+            print(f"[assign_victors] player list refresh: {e}")
+        try:
+            await update_mod_dashboard(interaction.guild)
+        except Exception as e:
+            print(f"[assign_victors] dashboard refresh: {e}")
+
+    reveal_note  = f"Role reveal posted to {reveal_ch.mention}." if reveal_ch else "⚠️ No channel found for role reveal."
+    neutral_note = f" + {len(neutral_win_pids)} neutral winner(s)." if neutral_win_pids else ""
     await interaction.followup.send(
-        f"✅ Stats recorded. **{winning_team.capitalize()}** team wins credited to {len(winner_pids)} players.\n"
+        f"✅ Stats recorded. **{winning_team.capitalize()}** team wins credited to {len(winner_pids)} players{neutral_note}\n"
         f"{reveal_note}",
         ephemeral=True)
 
@@ -21287,6 +21772,7 @@ class WraithRemarkTargetView(View):
         self.add_item(sel)
 
     async def on_new_target(self, interaction):
+        await interaction.response.defer(ephemeral=True)
         new_tid   = int(interaction.data["values"][0])
         guild_id  = self.guild_id
         guild     = interaction.guild
@@ -21304,13 +21790,12 @@ class WraithRemarkTargetView(View):
         db_set_wraith_mark(guild_id, self.actor_id, new_tid, night_num)
         db_save_night_action(guild_id, night_num, self.actor_id, "wraith_remark", new_tid)
 
-        old_m   = guild.get_member(self.remove_tid)
-        new_m   = guild.get_member(new_tid)
+        old_m    = guild.get_member(self.remove_tid)
+        new_m    = guild.get_member(new_tid)
         old_name = old_m.display_name if old_m else str(self.remove_tid)
         new_name = new_m.display_name if new_m else str(new_tid)
         actor    = guild.get_member(self.actor_id)
 
-        # Notify wraith den
         ws     = db_get_wraith_state(guild_id)
         den_ch = guild.get_channel(ws.get("den_channel_id") or 0)
         if den_ch:
@@ -21324,12 +21809,12 @@ class WraithRemarkTargetView(View):
             f"**{actor.display_name if actor else self.actor_id}** moved mark from "
             f"**{old_name}** (dead) to **{new_name}** (alive).")
 
-        await interaction.response.edit_message(
-            content=fmt(
+        await interaction.followup.send(
+            fmt(
                 f"🔄 **Mark moved.**\n"
                 f"**{old_name}**'s mark removed → **{new_name}** is now marked.\n"
                 f"*Your partner has been notified in the Wraith den.*"),
-            view=None)
+            ephemeral=True)
 
 
 class WraithMarkView(BaseNightView):
@@ -21750,13 +22235,23 @@ class WerekittenKillView(BaseNightView):
 class WhiteWolfView(BaseNightView):
     """
     White Wolf must kill a wolf within 3 attempts or die.
-    Strikes are earned by: skipping OR killing a non-wolf.
+    Starts Night 2. Strikes earned by skipping or killing a non-wolf.
     Only killing a wolf clears the obligation.
-    Strike counting is mod-confirmed via /ww_result after resolution.
     """
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
-        strikes = db_get_ww_strikes(self.guild_id, self.actor_id)
+        night_num = db_get_night_num(self.guild_id)
+
+        # Not active on Night 1
+        if night_num < 2:
+            btn = Button(
+                label    = "🤍 White Wolf ability begins Night 2",
+                style    = discord.ButtonStyle.secondary,
+                disabled = True)
+            self.add_item(btn)
+            return
+
+        strikes   = db_get_ww_strikes(self.guild_id, self.actor_id)
         remaining = 3 - strikes
 
         opts = self._player_options()
@@ -22139,141 +22634,313 @@ async def _send_day_ability_buttons(guild, guild_id: int, vote_end_ts: int):
 # ── Oracle ────────────────────────────────────────────────────────────────────
 class OracleView(BaseNightView):
     """
-    Each night the Oracle prophesizes who will die.
-    If correct at game end, declared among the winners.
+    Starting Night 2, the Oracle asks the mod one yes/no question per night.
+    Cannot share the answer outright — hints only.
+    Surge: Prophecy — once per game, predict who dies tonight.
     """
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
+        night_num = db_get_night_num(self.guild_id)
+
+        if night_num < 2:
+            btn = Button(
+                label    = "🔮 Crystal ball available from Night 2",
+                style    = discord.ButtonStyle.secondary,
+                disabled = True)
+            self.add_item(btn)
+        else:
+            ask_btn = Button(
+                label    = "🔮 Consult the Crystal Ball",
+                style    = discord.ButtonStyle.primary)
+            ask_btn.callback = self.on_ask
+            self.add_item(ask_btn)
+
+            skip = Button(label="🔮 No question tonight", style=discord.ButtonStyle.secondary)
+            skip.callback = self.on_skip
+            self.add_item(skip)
+
+        # Surge: Prophecy
+        if is_ability_surge(self.guild_id):
+            surge_uses = db_get_ability_uses(self.guild_id, self.actor_id + 1000000)
+            proph_btn  = Button(
+                label    = "⭐ Prophecy — Predict Tonight's Death (1 use)" if (surge_uses is None or surge_uses > 0) else "⭐ Prophecy Used",
+                style    = discord.ButtonStyle.danger if (surge_uses is None or surge_uses > 0) else discord.ButtonStyle.secondary,
+                disabled = (surge_uses is not None and surge_uses <= 0),
+                row      = 1
+            )
+            proph_btn.callback = self.on_prophecy
+            self.add_item(proph_btn)
+
+    async def on_ask(self, interaction):
+        await interaction.response.send_modal(OracleQuestionModal(self.guild_id, self.actor_id))
+
+    async def on_prophecy(self, interaction):
+        surge_uses = db_get_ability_uses(self.guild_id, self.actor_id + 1000000)
+        if surge_uses is not None and surge_uses <= 0:
+            return await interaction.response.send_message("❌ Already used.", ephemeral=True)
         opts = self._player_options()
-        if opts:
-            sel = Select(placeholder="🔮 Prophesy — who will die tonight or today?", options=opts)
-            sel.callback = self.on_select
-            self.add_item(sel)
-        skip = Button(label="🔮 No prophecy tonight", style=discord.ButtonStyle.secondary)
-        skip.callback = self.on_skip
-        self.add_item(skip)
-
-    async def on_select(self, interaction):
-        target_id = int(interaction.data["values"][0])
-        guild_id  = interaction.guild_id
-        night_num = db_get_night_num(guild_id)
-        target    = interaction.guild.get_member(target_id)
-        tname     = target.display_name if target else str(target_id)
-        actor     = interaction.guild.get_member(self.actor_id)
-
-        db_save_night_action(guild_id, night_num, self.actor_id, "oracle_prophecy", target_id)
-
-        await post_mod_log(interaction.guild,
-            f"🔮 **Oracle Prophecy** — Night {night_num}\n"
-            f"**{actor.display_name if actor else self.actor_id}** prophesies: "
-            f"**{tname}** will die.\n"
-            f"*Check at assign_victors — if correct, Oracle wins.*")
-
-        await interaction.response.edit_message(
-            content=fmt(
-                f"🔮 **Prophecy submitted.**\n\n"
-                f"You have prophesied that **{tname}** will die.\n"
-                f"*If your prophecy comes true, you will be declared among the winners.*"),
-            view=None)
+        if not opts:
+            return await interaction.response.send_message("No targets.", ephemeral=True)
+        view = OracleProphecyView(self.guild_id, self.actor_id, opts)
+        await interaction.response.send_message(
+            "⭐ **Prophecy — who will die tonight?**", view=view, ephemeral=True)
 
     async def on_skip(self, interaction):
         night_num = db_get_night_num(interaction.guild_id)
         db_save_night_action(interaction.guild_id, night_num, self.actor_id, "oracle_skip", None)
         await interaction.response.edit_message(
-            content=fmt("🔮 No prophecy tonight. The crystal ball remains dark."), view=None)
+            content=fmt("🔮 The crystal ball remains dark tonight."), view=None)
+
+
+class OracleQuestionModal(discord.ui.Modal, title="Consult the Crystal Ball"):
+    question = discord.ui.TextInput(
+        label       = "Your yes or no question",
+        placeholder = "e.g. Is Player X on the wolf team?",
+        max_length  = 200,
+        required    = True
+    )
+
+    def __init__(self, guild_id, actor_id):
+        super().__init__()
+        self.guild_id = guild_id
+        self.actor_id = actor_id
+
+    async def on_submit(self, interaction):
+        await interaction.response.defer(ephemeral=True)
+        guild_id  = self.guild_id
+        night_num = db_get_night_num(guild_id)
+        q         = self.question.value.strip()
+        actor     = interaction.guild.get_member(self.actor_id)
+
+        db_save_night_action(guild_id, night_num, self.actor_id, "oracle_question", None)
+
+        await post_mod_log(interaction.guild,
+            f"🔮 **Oracle Question** — Night {night_num}\n"
+            f"**{actor.display_name if actor else self.actor_id}** asks:\n"
+            f"*\"{q}\"*\n\n"
+            f"⚠️ Answer yes or no in their private channel. They may NOT share this answer outright — "
+            f"hints only. Eliminate them if they reveal it directly.")
+
+        # Deliver to Oracle's private channel so mod can reply there
+        rows     = db_get_assignments(guild_id)
+        my_row   = next((r for r in rows if r[0] == self.actor_id), None)
+        priv_ch  = interaction.guild.get_channel(my_row[3]) if my_row and len(my_row) > 3 else None
+        if priv_ch:
+            await priv_ch.send(fmt(
+                f"🔮 **Crystal Ball — Night {night_num}**\n\n"
+                f"Your question: *\"{q}\"*\n\n"
+                f"*The mod will deliver your answer here. Handle it lightly — "
+                f"you may not share it outright with the village or you will meet an untimely end.*"))
+
+        await interaction.followup.send(
+            fmt(f"🔮 **Question submitted.**\n*\"{q}\"*\nThe mod will answer in your private channel."),
+            ephemeral=True)
+
+
+class OracleProphecyView(View):
+    """Surge — pick who dies tonight."""
+    def __init__(self, guild_id, actor_id, opts):
+        super().__init__(timeout=120)
+        self.guild_id = guild_id
+        self.actor_id = actor_id
+        sel = Select(placeholder="⭐ Who will die tonight?", options=opts)
+        sel.callback = self.on_select
+        self.add_item(sel)
+
+    async def on_select(self, interaction):
+        target_id = int(interaction.data["values"][0])
+        guild_id  = self.guild_id
+        night_num = db_get_night_num(guild_id)
+        target    = interaction.guild.get_member(target_id)
+        tname     = target.display_name if target else str(target_id)
+        actor     = interaction.guild.get_member(self.actor_id)
+
+        db_deduct_ability_uses(guild_id, self.actor_id + 1000000)
+        db_save_night_action(guild_id, night_num, self.actor_id, "oracle_prophecy", target_id)
+
+        await post_mod_log(interaction.guild,
+            f"⭐ **Oracle Prophecy (Surge)** — Night {night_num}\n"
+            f"**{actor.display_name if actor else self.actor_id}** prophesies: "
+            f"**{tname}** will die.\n"
+            f"*Check at assign_victors — if correct, Oracle wins regardless of team.*")
+
+        await interaction.response.edit_message(
+            content=fmt(
+                f"⭐ **Prophecy submitted.**\n\n"
+                f"You have prophesied that **{tname}** will die tonight.\n"
+                f"*If your prophecy comes true, you will be declared among the winners.*"),
+            view=None)
 
 
 # ── Warlock ───────────────────────────────────────────────────────────────────
 class WarlockView(BaseNightView):
     """
-    Once per game the Warlock picks two alive players and swaps their roles.
-    Neither player is told by the bot — mod sends new role cards.
+    Primary ability — Grant a Wish.
+    The mod notifies the Warlock a wish has been requested.
+    Warlock chooses to grant it or not. If granted, a wheel spin determines the price.
+    Warlock never learns what the wish was.
     """
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
-        state    = cached_get_state(self.guild_id) or {}
-        used     = bool(state.get("warlock_swap_used", 0))
+        state = cached_get_state(self.guild_id) or {}
+        used  = bool(state.get("warlock_swap_used", 0))
 
         if used:
-            btn = Button(label="✅ Role Swap already used this game",
+            btn = Button(label="✅ Wish already granted this game",
                          style=discord.ButtonStyle.secondary, disabled=True)
             self.add_item(btn)
         else:
-            opts = self._player_options()
-            if opts:
-                sel1 = Select(
-                    placeholder = "🔄 Choose first player to swap",
-                    options     = opts,
-                    custom_id   = f"warlock_p1_{self.guild_id}_{self.actor_id}"
-                )
-                sel1.callback = self.on_player1
-                self.add_item(sel1)
+            grant_btn = Button(
+                label  = "✨ Grant the Wish",
+                style  = discord.ButtonStyle.green
+            )
+            deny_btn = Button(
+                label  = "❌ Deny the Wish",
+                style  = discord.ButtonStyle.danger
+            )
+            pass_btn = Button(
+                label  = "💤 No wish requested tonight",
+                style  = discord.ButtonStyle.secondary
+            )
+            grant_btn.callback = self.on_grant
+            deny_btn.callback  = self.on_deny
+            pass_btn.callback  = self.on_skip
+            self.add_item(grant_btn)
+            self.add_item(deny_btn)
+            self.add_item(pass_btn)
 
-            skip = Button(label="Skip — use swap another night",
-                          style=discord.ButtonStyle.secondary)
-            skip.callback = self.on_skip
-            self.add_item(skip)
+        # Surge: Soul Swap — swap two players' roles including self
+        if is_ability_surge(self.guild_id):
+            surge_uses = db_get_ability_uses(self.guild_id, self.actor_id + 1000000)
+            swap_btn   = Button(
+                label    = "🔮 Soul Swap — Swap Two Roles (1 use)" if (surge_uses is None or surge_uses > 0) else "🔮 Soul Swap Used",
+                style    = discord.ButtonStyle.primary if (surge_uses is None or surge_uses > 0) else discord.ButtonStyle.secondary,
+                disabled = (surge_uses is not None and surge_uses <= 0),
+                row      = 1
+            )
+            swap_btn.callback = self.on_soul_swap
+            self.add_item(swap_btn)
 
-        self._p1 = None
-
-    async def on_player1(self, interaction):
-        self._p1 = int(interaction.data["values"][0])
-        p1       = interaction.guild.get_member(self._p1)
-        p1name   = p1.display_name if p1 else str(self._p1)
-
-        # Build second dropdown excluding first choice
+    async def on_soul_swap(self, interaction):
+        surge_uses = db_get_ability_uses(self.guild_id, self.actor_id + 1000000)
+        if surge_uses is not None and surge_uses <= 0:
+            return await interaction.response.send_message("❌ Already used.", ephemeral=True)
         rows = db_get_assignments(self.guild_id)
+        # Include self in options
         opts = [discord.SelectOption(
             label=interaction.guild.get_member(r[0]).display_name[:80]
-                  if interaction.guild.get_member(r[0]) else str(r[0]),
+                  if interaction.guild.get_member(r[0]) else f"Player {r[0]}",
             value=str(r[0]))
-            for r in rows if r[2] == 1 and r[0] != self._p1 and r[0] != self.actor_id][:25]
-
-        if not opts:
-            return await interaction.response.send_message(
-                "❌ No second player available.", ephemeral=True)
-
-        view = WarlockSwapP2View(self.guild_id, self.actor_id, self._p1, p1name, opts)
+            for r in rows if r[2] == 1][:25]
+        view = WarlockSoulSwapView(self.guild_id, self.actor_id, opts)
+        await interaction.response.send_message(
+            "🔮 **Soul Swap — Step 1:** Choose the first player (can be yourself):",
+            view=view, ephemeral=True)
+        night_num = db_get_night_num(self.guild_id)
+        db_set_state(self.guild_id, warlock_swap_used=1)
+        db_save_night_action(self.guild_id, night_num, self.actor_id, "warlock_grant", None)
+        actor = interaction.guild.get_member(self.actor_id)
+        await post_mod_log(interaction.guild,
+            f"✨ **Warlock granted a wish** — Night {night_num}\n"
+            f"**{actor.display_name if actor else self.actor_id}** chose to grant the wish.\n"
+            f"⚠️ Spin the wheel to determine the price — one player is removed from the game.\n"
+            f"⚠️ Do NOT tell the Warlock what wish was granted.")
         await interaction.response.edit_message(
-            content=fmt(f"🔄 First player: **{p1name}**\nNow choose the second player to swap with:"),
-            view=view)
+            content=fmt(
+                "✨ **Wish granted.**\n\n"
+                "*You have chosen to grant the wish. You will never know what it was.*\n"
+                "*The price has been set in motion. The mod will handle the consequences.*"),
+            view=None)
+
+    async def on_deny(self, interaction):
+        night_num = db_get_night_num(self.guild_id)
+        db_save_night_action(self.guild_id, night_num, self.actor_id, "warlock_deny", None)
+        actor = interaction.guild.get_member(self.actor_id)
+        await post_mod_log(interaction.guild,
+            f"❌ **Warlock denied the wish** — Night {night_num}\n"
+            f"**{actor.display_name if actor else self.actor_id}** chose NOT to grant the wish.\n"
+            f"⚠️ No price is paid. The wish goes unfulfilled.")
+        await interaction.response.edit_message(
+            content=fmt(
+                "❌ **Wish denied.**\n\n"
+                "*You chose not to grant it. The wish goes unfulfilled.*\n"
+                "*You still have your wish to grant — it may be requested again.*"),
+            view=None)
 
     async def on_skip(self, interaction):
         night_num = db_get_night_num(self.guild_id)
         db_save_night_action(self.guild_id, night_num, self.actor_id, "warlock_skip", None)
         await interaction.response.edit_message(
-            content=fmt("🔄 Swap saved for another night."), view=None)
+            content=fmt("💤 No wish was requested tonight."), view=None)
+
+
+class WarlockSoulSwapView(View):
+    """
+    Surge ability — Soul Swap.
+    Once per game, permanently swap two players' roles. Can include self.
+    """
+    def __init__(self, guild_id, actor_id, opts):
+        super().__init__(timeout=120)
+        self.guild_id = guild_id
+        self.actor_id = actor_id
+        self._p1      = None
+        self._p1name  = None
+        sel = Select(placeholder="🔮 Soul Swap — choose first player (can be yourself)...",
+                     options=opts)
+        sel.callback = self.on_player1
+        self.add_item(sel)
+
+    async def on_player1(self, interaction):
+        self._p1     = int(interaction.data["values"][0])
+        p1           = interaction.guild.get_member(self._p1)
+        self._p1name = p1.display_name if p1 else str(self._p1)
+        rows = db_get_assignments(self.guild_id)
+        opts = [discord.SelectOption(
+            label=interaction.guild.get_member(r[0]).display_name[:80]
+                  if interaction.guild.get_member(r[0]) else f"Player {r[0]}",
+            value=str(r[0]))
+            for r in rows if r[2] == 1 and r[0] != self._p1][:25]
+        if not opts:
+            return await interaction.response.send_message(
+                "❌ No second player available.", ephemeral=True)
+        view = WarlockSwapP2View(self.guild_id, self.actor_id, self._p1, self._p1name, opts,
+                                 is_surge=True)
+        await interaction.response.edit_message(
+            content=fmt(f"🔮 First player: **{self._p1name}**\nNow choose the second player to swap with:"),
+            view=view)
 
 
 class WarlockSwapP2View(View):
-    def __init__(self, guild_id, actor_id, p1_id, p1name, opts):
+    def __init__(self, guild_id, actor_id, p1_id, p1name, opts, is_surge=False):
         super().__init__(timeout=120)
         self.guild_id = guild_id
         self.actor_id = actor_id
         self.p1_id    = p1_id
         self.p1name   = p1name
-        sel = Select(placeholder="🔄 Choose second player to swap", options=opts)
+        self.is_surge = is_surge
+        sel = Select(
+            placeholder = "🔮 Choose second player to swap" if is_surge else "🔄 Choose second player",
+            options     = opts)
         sel.callback = self.on_player2
         self.add_item(sel)
 
     async def on_player2(self, interaction):
-        p2_id   = int(interaction.data["values"][0])
-        guild   = interaction.guild
-        guild_id= self.guild_id
-        p2      = guild.get_member(p2_id)
-        p2name  = p2.display_name if p2 else str(p2_id)
+        p2_id    = int(interaction.data["values"][0])
+        guild    = interaction.guild
+        guild_id = self.guild_id
+        p2       = guild.get_member(p2_id)
+        p2name   = p2.display_name if p2 else str(p2_id)
 
-        # Get both roles
-        rows    = db_get_assignments(guild_id)
-        r1      = next((r for r in rows if r[0] == self.p1_id), None)
-        r2      = next((r for r in rows if r[0] == p2_id), None)
+        rows  = db_get_assignments(guild_id)
+        r1    = next((r for r in rows if r[0] == self.p1_id), None)
+        r2    = next((r for r in rows if r[0] == p2_id), None)
         if not r1 or not r2:
-            return await interaction.response.send_message("❌ Could not find both players.", ephemeral=True)
+            return await interaction.response.send_message(
+                "❌ Could not find both players.", ephemeral=True)
 
         role1, role2 = r1[1], r2[1]
         night_num    = db_get_night_num(guild_id)
 
-        # Swap roles in DB
         conn = sqlite3.connect(DB_FILE)
         c    = conn.cursor()
         c.execute("UPDATE player_assignments SET role_name=? WHERE guild_id=? AND player_id=?",
@@ -22284,24 +22951,23 @@ class WarlockSwapP2View(View):
         conn.close()
         invalidate_cache(guild_id)
 
-        db_set_state(guild_id, warlock_swap_used=1)
-        db_save_night_action(guild_id, night_num, self.actor_id, "warlock_swap", self.p1_id)
+        if self.is_surge:
+            db_deduct_ability_uses(guild_id, self.actor_id + 1000000)
         actor = guild.get_member(self.actor_id)
+        label = "🔮 **Surge Soul Swap**" if self.is_surge else "🔄 **Warlock Role Swap**"
 
         await post_mod_log(guild,
-            f"🔄 **Warlock Role Swap** — Night {night_num}\n"
-            f"**{actor.display_name if actor else self.actor_id}** swapped roles:\n"
-            f"**{self.p1name}** is now {role2}\n"
-            f"**{p2name}** is now {role1}\n"
-            f"⚠️ Send new role cards to both players manually.\n"
-            f"⚠️ Update any ability_uses or night tracking for the swapped roles.")
+            f"{label} — Night {night_num}\n"
+            f"**{actor.display_name if actor else self.actor_id}** swapped:\n"
+            f"**{self.p1name}** → now {role2}\n"
+            f"**{p2name}** → now {role1}\n"
+            f"⚠️ Send new role cards to both players manually.")
 
         await interaction.response.edit_message(
             content=fmt(
-                f"🔄 **Role Swap complete.**\n\n"
-                f"**{self.p1name}** and **{p2name}** have had their roles swapped.\n"
-                f"*Neither player has been notified. The mod will handle role cards.*\n"
-                f"*This was your one swap for the game.*"),
+                f"🔮 **Soul Swap complete.**\n\n"
+                f"**{self.p1name}** and **{p2name}** have had their roles swapped permanently.\n"
+                f"*Neither player has been notified. The mod will handle role cards.*"),
             view=None)
 
 
@@ -22912,14 +23578,16 @@ class VillageSurgeDayView(View):
                 self.add_item(btn)
 
         elif role_name == "Jafar":
-            # Reroll
+            # Double Choice — uses start at 2, shown as remaining
+            surge_uses = db_get_ability_uses(self.guild_id, self.actor_id + 1000000)
+            remaining  = surge_uses if surge_uses is not None else 2
             btn = Button(
-                label    = "🎲 Reroll — Get a New Morning Ability (1 use)" if not used else "🎲 Reroll Used",
-                style    = discord.ButtonStyle.primary if not used else discord.ButtonStyle.secondary,
-                disabled = used,
+                label    = f"🎭 Double Choice — Choose Today's Ability ({remaining} use{'s' if remaining != 1 else ''} left)" if remaining > 0 else "🎭 Double Choice Used",
+                style    = discord.ButtonStyle.primary if remaining > 0 else discord.ButtonStyle.secondary,
+                disabled = remaining <= 0,
                 custom_id= f"surge_jafar_{guild_id}_{actor_id}"
             )
-            btn.callback = self.on_reroll
+            btn.callback = self.on_double_choice
             self.add_item(btn)
 
     # ── Handlers ──────────────────────────────────────────────────────────────
@@ -23212,14 +23880,57 @@ class VillageSurgeDayView(View):
         await interaction.response.edit_message(
             content=fmt("🤔 **Gut Feeling used.** Result delivered to your private channel."), view=None)
 
-    async def on_reroll(self, interaction):
-        if not await self._check_and_deduct(interaction, "Reroll"): return
-        actor = interaction.guild.get_member(self.actor_id)
+    async def on_double_choice(self, interaction):
+        """Jafar Double Choice — pick any village role ability for today."""
+        surge_uses = db_get_ability_uses(self.guild_id, self.actor_id + 1000000)
+        if surge_uses is not None and surge_uses <= 0:
+            return await interaction.response.send_message("❌ No Double Choice uses remaining.", ephemeral=True)
+        if interaction.user.id != self.actor_id:
+            return await interaction.response.send_message("❌ Not your ability.", ephemeral=True)
+
+        # Build list of village roles (excluding Jafar itself)
+        all_roles = cached_load_roles(self.guild_id)
+        eligible  = [r["name"] for r in all_roles
+                     if r.get("team") == "village"
+                     and r["name"] != "Jafar"
+                     and r["name"] not in ("Villager", "Drunk", "Village Idiot", "Virgin", "Flirt")]
+        eligible  = sorted(eligible)[:25]
+
+        opts = [discord.SelectOption(label=r, value=r) for r in eligible]
+        view = JafarDoubleChoicePickerView(self.guild_id, self.actor_id, opts)
+        await interaction.response.send_message(
+            "🎭 **Double Choice — pick your ability for today:**",
+            view=view, ephemeral=True)
+
+
+class JafarDoubleChoicePickerView(View):
+    """Jafar picks which village role ability they want today — surge only, 2 uses."""
+    def __init__(self, guild_id, actor_id, opts):
+        super().__init__(timeout=120)
+        self.guild_id = guild_id
+        self.actor_id = actor_id
+        sel = Select(placeholder="🎭 Choose a village role ability...", options=opts)
+        sel.callback = self.on_select
+        self.add_item(sel)
+
+    async def on_select(self, interaction):
+        chosen = interaction.data["values"][0]
+        db_deduct_ability_uses(self.guild_id, self.actor_id + 1000000)
+        actor  = interaction.guild.get_member(self.actor_id)
+        surge_uses = db_get_ability_uses(self.guild_id, self.actor_id + 1000000)
+        remaining  = surge_uses if surge_uses is not None else 0
         await post_mod_log(interaction.guild,
-            f"🎲 **Surge Reroll — Jafar** — {actor.display_name if actor else self.actor_id}\n"
-            f"⚠️ Reroll their morning ability. Give them a new random ability for today instead of the one they received.")
+            f"🎭 **Surge Double Choice — Jafar** — {actor.display_name if actor else self.actor_id}\n"
+            f"Chose: **{chosen}** for today.\n"
+            f"⚠️ Give them the **{chosen}** ability for today instead of their random spin.\n"
+            f"Uses remaining: {remaining}")
         await interaction.response.edit_message(
-            content=fmt("🎲 **Reroll used.** The mod will assign you a new random ability for today."), view=None)
+            content=fmt(
+                f"🎭 **Double Choice used.**\n\n"
+                f"You chose **{chosen}** for today.\n"
+                f"The mod will assign you this ability instead of today's random spin.\n"
+                f"*{remaining} use{'s' if remaining != 1 else ''} remaining.*"),
+            view=None)
 
 
 ROLE_VIEW_MAP = {
@@ -23365,7 +24076,7 @@ class PothreadSecondKillView(View):
 # ── Village Jokester Kill View ─────────────────────────────────────────────
 class JokesterKillView(View):
     """Shown to Village Jokester after they are voted out — pick one voter to kill."""
-    def __init__(self, guild_id, jokester_id, voter_ids):
+    def __init__(self, guild_id, jokester_id, voter_ids, guild=None):
         super().__init__(timeout=300)
         self.guild_id    = guild_id
         self.jokester_id = jokester_id
@@ -23376,10 +24087,15 @@ class JokesterKillView(View):
             return
         options = []
         for pid in voter_ids[:25]:
-            # Get name from guild — will be fetched when needed
+            # Resolve display name if guild available
+            name = None
+            if guild:
+                m = guild.get_member(pid)
+                if m:
+                    name = m.display_name[:80]
             options.append(discord.SelectOption(
-                label=str(pid),   # patched to display name when sent
-                value=str(pid)
+                label  = name or f"Player {pid}",
+                value  = str(pid)
             ))
         sel = Select(placeholder="☠️ Choose one voter to take with you...", options=options)
         sel.callback = self.on_select
@@ -26115,9 +26831,9 @@ class WizardQ1PlayerCount(discord.ui.Modal, title="Game Setup — Step 1 of 6"):
 
 class WizardQ2ReservationsView(View):
     """
-    Step 2 — Reserved roles.
-    Three buttons: Add Reservation, No Reservations, Done (move on).
-    Uses dropdowns instead of modals to avoid interaction timeout.
+    Step 2 of 6 — Reserved roles.
+    Handles 50+ players by splitting into two alphabetical dropdowns.
+    Add / Remove Last / Done buttons.
     """
     def __init__(self, guild_id: int, state: SetupWizardState,
                  guild: discord.Guild = None):
@@ -26130,7 +26846,6 @@ class WizardQ2ReservationsView(View):
     def _build(self):
         self.clear_items()
 
-        # Add Reservation button — opens player+role selectors
         add_btn = Button(
             label  = "➕ Add a Reservation",
             style  = discord.ButtonStyle.primary,
@@ -26139,19 +26854,17 @@ class WizardQ2ReservationsView(View):
         add_btn.callback = self.on_add
         self.add_item(add_btn)
 
-        # Done / No Reservations button
         if self.state.reservations:
             done_btn = Button(
-                label  = "✅ Done — move to next step",
+                label  = "✅ Done — next step",
                 style  = discord.ButtonStyle.green,
                 row    = 0
             )
             done_btn.callback = self.on_done
             self.add_item(done_btn)
 
-            # Remove last button if reservations exist
             remove_btn = Button(
-                label  = "❌ Remove Last Reservation",
+                label  = "❌ Remove Last",
                 style  = discord.ButtonStyle.danger,
                 row    = 0
             )
@@ -26167,15 +26880,14 @@ class WizardQ2ReservationsView(View):
             self.add_item(skip_btn)
 
     def build_embed(self):
-        reserved = self.state.reservations
         desc = (
             f"**Players:** {self.state.player_count}\n\n"
             "Does anyone have a reserved role for this game?\n"
-            "*(Reserved roles are assigned to that player automatically at game start.)*\n\n"
+            "*(Reserved roles are assigned automatically at game start.)*\n\n"
         )
-        if reserved:
+        if self.state.reservations:
             lines = []
-            for pid, role in reserved.items():
+            for pid, role in self.state.reservations.items():
                 m    = self.guild.get_member(pid) if self.guild else None
                 name = m.display_name if m else str(pid)
                 lines.append(f"• **{name}** → {role}")
@@ -26190,41 +26902,34 @@ class WizardQ2ReservationsView(View):
         )
 
     async def on_add(self, interaction: discord.Interaction):
-        """Show player dropdown first."""
-        members = [m for m in interaction.guild.members
-                   if not m.bot][:25]
-        if not members:
-            return await interaction.response.send_message(
-                "No members found.", ephemeral=True)
-
-        player_opts = [discord.SelectOption(
-            label = m.display_name[:80],
-            value = str(m.id)
-        ) for m in members]
-
+        members = sorted(
+            [m for m in interaction.guild.members if not m.bot],
+            key=lambda m: m.display_name.lower()
+        )
         view = WizardReservationPickerView(
-            self.guild_id, self.state, player_opts, parent=self)
+            self.guild_id, self.state, members, parent=self)
         await interaction.response.edit_message(
-            embed = discord.Embed(
+            embed=discord.Embed(
                 title       = "Step 2 of 6 — Add Reservation",
-                description = "**Step 1:** Choose a player from the dropdown below.",
+                description = "Choose a player and a role, then click **Confirm**.",
                 color       = 0x9B59B6
             ),
-            view = view
+            view=view
         )
 
     async def on_remove(self, interaction: discord.Interaction):
-        """Remove the last added reservation."""
         if self.state.reservations:
             last_key = list(self.state.reservations.keys())[-1]
             del self.state.reservations[last_key]
         self.guild = interaction.guild
         self._build()
-        await interaction.response.edit_message(
-            embed = self.build_embed(), view = self)
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
     async def on_done(self, interaction: discord.Interaction):
-        """Save reservations to DB and advance to step 3."""
+        # Respond first, DB work after
+        view = WizardQ3RolesView(self.guild_id, self.state)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+        # Save reservations to DB
         conn = sqlite3.connect(DB_FILE)
         c    = conn.cursor()
         c.execute("DELETE FROM reservations WHERE guild_id=?", (self.guild_id,))
@@ -26234,13 +26939,10 @@ class WizardQ2ReservationsView(View):
             m    = interaction.guild.get_member(pid)
             name = m.display_name if m else str(pid)
             db_set_reservation(self.guild_id, pid, name, role)
-        view = WizardQ3ThemeView(self.guild_id, self.state)
-        await interaction.response.edit_message(
-            embed = view.build_embed(), view = view)
 
 
 class WizardReservationPickerView(View):
-    """Two-step dropdown — pick player then role."""
+    """Player + role picker. Splits players alphabetically if over 25."""
     ALL_ROLES = [
         "Wolf","Alpha","Elite Alpha","Blessed Wolf","Bloodhound","Bloodletter",
         "Crazed Wolf","Dire Wolf","Echo-Stalker","Shadow Wolf","Werekitten","Wolf Pup",
@@ -26251,242 +26953,128 @@ class WizardReservationPickerView(View):
         "Witch","Oracle","Warlock","Fairy Elf","Wraith","Chaos Gremlin",
     ]
 
-    def __init__(self, guild_id, state, player_opts, parent):
+    def __init__(self, guild_id, state, members, parent):
         super().__init__(timeout=300)
-        self.guild_id    = guild_id
-        self.state       = state
-        self.parent      = parent
-        self.selected_pid  = None
-        self.selected_name = None
+        self.guild_id       = guild_id
+        self.state          = state
+        self.parent         = parent
+        self.selected_pid   = None
+        self.selected_name  = None
+        self._selected_role = None
+        self._members       = members
 
-        # Player dropdown
-        player_sel = Select(
-            placeholder = "1️⃣ Choose a player...",
-            options     = player_opts,
-            row         = 0
-        )
-        player_sel.callback = self.on_player
-        self.add_item(player_sel)
+        # Split members alphabetically if over 25
+        if len(members) <= 25:
+            player_opts = [discord.SelectOption(
+                label=m.display_name[:80], value=str(m.id)) for m in members]
+            sel = Select(placeholder="1️⃣ Choose a player...",
+                         options=player_opts, row=0)
+            sel.callback = self.on_player
+            self.add_item(sel)
+        else:
+            # Split into two halves alphabetically
+            mid   = len(members) // 2
+            half1 = members[:mid]
+            half2 = members[mid:]
+            opts1 = [discord.SelectOption(
+                label=m.display_name[:80], value=str(m.id)) for m in half1[:25]]
+            opts2 = [discord.SelectOption(
+                label=m.display_name[:80], value=str(m.id)) for m in half2[:25]]
+            sel1 = Select(
+                placeholder=f"1️⃣ Players A–{half1[-1].display_name[0].upper()}...",
+                options=opts1, row=0)
+            sel2 = Select(
+                placeholder=f"1️⃣ Players {half2[0].display_name[0].upper()}–Z...",
+                options=opts2, row=1)
+            sel1.callback = self.on_player
+            sel2.callback = self.on_player
+            self.add_item(sel1)
+            self.add_item(sel2)
 
-        # Role dropdown (25 roles max per Select — split into two)
+        # Role dropdown — all 47 roles split into two selects
         role_opts_1 = [discord.SelectOption(label=r, value=r)
                        for r in self.ALL_ROLES[:25]]
-        role_sel = Select(
-            placeholder = "2️⃣ Choose a role...",
-            options     = role_opts_1,
-            row         = 1
-        )
-        role_sel.callback = self.on_role
-        self.add_item(role_sel)
+        role_opts_2 = [discord.SelectOption(label=r, value=r)
+                       for r in self.ALL_ROLES[25:]]
 
-        # Confirm button
-        confirm = Button(
+        role_row = 2 if len(members) <= 25 else 2
+        rol_sel_1 = Select(placeholder="2️⃣ Choose a role (Wolf–Gravedigger)...",
+                           options=role_opts_1, row=role_row)
+        rol_sel_2 = Select(placeholder="2️⃣ Choose a role (Clone–Chaos Gremlin)...",
+                           options=role_opts_2, row=role_row + 1)
+        rol_sel_1.callback = self.on_role
+        rol_sel_2.callback = self.on_role
+        self.add_item(rol_sel_1)
+        self.add_item(rol_sel_2)
+
+        self._confirm = Button(
             label    = "✅ Confirm Reservation",
             style    = discord.ButtonStyle.green,
             disabled = True,
-            row      = 2
+            row      = 4
         )
-        confirm.callback = self.on_confirm
-        self._confirm    = confirm
-        self.add_item(confirm)
+        self._confirm.callback = self.on_confirm
+        self.add_item(self._confirm)
 
-        # Back button
-        back = Button(
-            label    = "← Back",
-            style    = discord.ButtonStyle.secondary,
-            row      = 2
-        )
+        back = Button(label="← Back", style=discord.ButtonStyle.secondary, row=4)
         back.callback = self.on_back
         self.add_item(back)
 
-        self._selected_role = None
+    def _build_embed(self):
+        return discord.Embed(
+            title       = "Step 2 of 6 — Add Reservation",
+            description = (
+                "Choose a player and a role, then click **Confirm**.\n\n"
+                f"**Player:** {self.selected_name or '*not selected*'} {'✅' if self.selected_name else ''}\n"
+                f"**Role:** {self._selected_role or '*not selected*'} {'✅' if self._selected_role else ''}"
+            ),
+            color = 0x9B59B6
+        )
 
-    async def on_player(self, interaction: discord.Interaction):
+    async def on_player(self, interaction):
         self.selected_pid  = int(interaction.data["values"][0])
         m = interaction.guild.get_member(self.selected_pid)
         self.selected_name = m.display_name if m else str(self.selected_pid)
-        self._maybe_enable_confirm()
-        await interaction.response.edit_message(
-            embed = self._build_embed(), view = self)
-
-    async def on_role(self, interaction: discord.Interaction):
-        self._selected_role = interaction.data["values"][0]
-        self._maybe_enable_confirm()
-        await interaction.response.edit_message(
-            embed = self._build_embed(), view = self)
-
-    def _maybe_enable_confirm(self):
         self._confirm.disabled = not (self.selected_pid and self._selected_role)
+        await interaction.response.edit_message(embed=self._build_embed(), view=self)
 
-    def _build_embed(self):
-        lines = []
-        if self.selected_name:
-            lines.append(f"**Player:** {self.selected_name} ✅")
-        else:
-            lines.append("**Player:** *not selected*")
-        if self._selected_role:
-            lines.append(f"**Role:** {self._selected_role} ✅")
-        else:
-            lines.append("**Role:** *not selected*")
-        return discord.Embed(
-            title       = "Step 2 of 6 — Add Reservation",
-            description = "Select a player and a role, then click Confirm.\n\n" + "\n".join(lines),
-            color       = 0x9B59B6
-        )
+    async def on_role(self, interaction):
+        self._selected_role    = interaction.data["values"][0]
+        self._confirm.disabled = not (self.selected_pid and self._selected_role)
+        await interaction.response.edit_message(embed=self._build_embed(), view=self)
 
-    async def on_confirm(self, interaction: discord.Interaction):
+    async def on_confirm(self, interaction):
         if not self.selected_pid or not self._selected_role:
             return await interaction.response.send_message(
-                "Please select both a player and a role.", ephemeral=True)
+                "Select both a player and a role.", ephemeral=True)
         self.state.reservations[self.selected_pid] = self._selected_role
         self.parent.guild = interaction.guild
         self.parent._build()
         await interaction.response.edit_message(
-            embed = self.parent.build_embed(),
-            view  = self.parent)
+            embed=self.parent.build_embed(), view=self.parent)
 
-    async def on_back(self, interaction: discord.Interaction):
+    async def on_back(self, interaction):
         self.parent.guild = interaction.guild
         self.parent._build()
         await interaction.response.edit_message(
-            embed = self.parent.build_embed(),
-            view  = self.parent)
+            embed=self.parent.build_embed(), view=self.parent)
 
 
 class WizardReservationModal(discord.ui.Modal, title="Add a Reservation"):
-    """Kept for legacy compatibility but no longer used in wizard flow."""
-    player_mention = discord.ui.TextInput(
-        label="Player username", placeholder="e.g. JohnDoe", required=True)
-    role_name = discord.ui.TextInput(
-        label="Role name", placeholder="e.g. Alpha, Seer, Witch", required=True)
+    """Legacy — no longer used."""
+    player_mention = discord.ui.TextInput(label="Player", required=True)
+    role_name      = discord.ui.TextInput(label="Role",   required=True)
 
     def __init__(self, guild_id, state, parent_view):
         super().__init__()
-        self.guild_id    = guild_id
-        self.state       = state
-        self.parent_view = parent_view
 
     async def on_submit(self, interaction):
         await interaction.response.send_message(
-            "Please use the dropdown buttons instead.", ephemeral=True)
+            "Please use the dropdowns instead.", ephemeral=True)
 
 
-class WizardQ3ThemeView(View):
-    """Ask which theme to use."""
-    def __init__(self, guild_id: int, state: SetupWizardState):
-        super().__init__(timeout=300)
-        self.guild_id = guild_id
-        self.state    = state
-
-        for label, value, emoji in [
-            ("Normal",       "normal", "🎮"),
-            ("Disney",       "disney", "🏰"),
-            ("Harry Potter", "hp",     "⚡"),
-            ("Greek Gods",   "greek",  "🏛️"),
-        ]:
-            btn = Button(label=f"{emoji} {label}", style=discord.ButtonStyle.primary)
-            btn.callback = self._make_cb(value)
-            self.add_item(btn)
-
-    def _make_cb(self, value):
-        async def cb(interaction):
-            self.state.theme = value
-            view = WizardQ4SurgeView(self.guild_id, self.state)
-            await interaction.response.edit_message(embed=view.build_embed(), view=view)
-        return cb
-
-    def build_embed(self):
-        res_lines = [f"**{v}** → <@{k}>" for k, v in self.state.reservations.items()]
-        return discord.Embed(
-            title       = "Step 3 of 6 — Theme",
-            description = (
-                f"**Players:** {self.state.player_count}\n"
-                + (("**Reservations:** " + ", ".join(res_lines) + "\n") if res_lines else "")
-                + "\nWhich theme for this game?"
-            ),
-            color = 0x3498DB
-        )
-
-
-class WizardQ4SurgeView(View):
-    """Ask about Ability Surge."""
-    def __init__(self, guild_id: int, state: SetupWizardState):
-        super().__init__(timeout=300)
-        self.guild_id = guild_id
-        self.state    = state
-
-        yes_btn = Button(label="⚡ Yes — Ability Surge on",  style=discord.ButtonStyle.primary)
-        no_btn  = Button(label="🎮 No — Standard game",      style=discord.ButtonStyle.secondary)
-        yes_btn.callback = self._on_yes
-        no_btn.callback  = self._on_no
-        self.add_item(yes_btn)
-        self.add_item(no_btn)
-
-    async def _on_yes(self, interaction):
-        self.state.surge = True
-        view = WizardQ5ChaosView(self.guild_id, self.state)
-        await interaction.response.edit_message(embed=view.build_embed(), view=view)
-
-    async def _on_no(self, interaction):
-        self.state.surge = False
-        view = WizardQ5ChaosView(self.guild_id, self.state)
-        await interaction.response.edit_message(embed=view.build_embed(), view=view)
-
-    def build_embed(self):
-        theme_labels = {"normal":"🎮 Normal","disney":"🏰 Disney","hp":"⚡ Harry Potter","greek":"🏛️ Greek Gods"}
-        return discord.Embed(
-            title       = "Step 4 of 6 — Ability Surge",
-            description = (
-                f"**Players:** {self.state.player_count}\n"
-                f"**Theme:** {theme_labels.get(self.state.theme,'Normal')}\n\n"
-                "**Ability Surge** gives every role a second once-per-game ability.\n"
-                "Great for experienced groups — adds a lot of complexity.\n\n"
-                "Turn it on for this game?"
-            ),
-            color = 0xF39C12
-        )
-
-
-class WizardQ5ChaosView(View):
-    """Ask about chaos mode."""
-    def __init__(self, guild_id: int, state: SetupWizardState):
-        super().__init__(timeout=300)
-        self.guild_id = guild_id
-        self.state    = state
-
-        for label, value, style in [
-            ("🎮 No chaos — standard",           "none",  discord.ButtonStyle.secondary),
-            ("🎭 Hidden Roster — roles unknown",  "roles", discord.ButtonStyle.primary),
-            ("👥 Hidden Count — player count unknown", "count", discord.ButtonStyle.primary),
-            ("🌪️ Full Chaos — both hidden",       "full",  discord.ButtonStyle.danger),
-        ]:
-            btn = Button(label=label, style=style)
-            btn.callback = self._make_cb(value)
-            self.add_item(btn)
-
-    def _make_cb(self, value):
-        async def cb(interaction):
-            self.state.chaos = value
-            view = WizardQ6RolesView(self.guild_id, self.state)
-            await interaction.response.edit_message(embed=view.build_embed(), view=view)
-        return cb
-
-    def build_embed(self):
-        theme_labels = {"normal":"🎮 Normal","disney":"🏰 Disney","hp":"⚡ Harry Potter","greek":"🏛️ Greek Gods"}
-        return discord.Embed(
-            title       = "Step 5 of 6 — Chaos Mode",
-            description = (
-                f"**Players:** {self.state.player_count}\n"
-                f"**Theme:** {theme_labels.get(self.state.theme,'Normal')}\n"
-                f"**Surge:** {'⚡ On' if self.state.surge else 'Off'}\n\n"
-                "Choose a chaos setting:"
-            ),
-            color = 0xE74C3C
-        )
-
-
-class WizardQ6RolesView(View):
-    """Role selection — full checklist grouped by team."""
+class WizardQ3RolesView(View):
+    """Step 3 of 6 — Role selection."""
     WOLVES   = ["Wolf","Alpha","Elite Alpha","Blessed Wolf","Bloodhound","Bloodletter",
                 "Crazed Wolf","Dire Wolf","Echo-Stalker","Shadow Wolf","Werekitten","Wolf Pup"]
     VILLAGE  = ["Villager","Seer","Doctor","Surgeon","Huntsman","Sheriff","Medium","Mayor",
@@ -26504,7 +27092,6 @@ class WizardQ6RolesView(View):
         self._build()
 
     def _suggest(self, n: int) -> dict:
-        """Generate a balanced role suggestion based on player count."""
         if n <= 8:
             return {"Wolf":1,"Werekitten":1,"Seer":1,"Doctor":1,"Huntsman":1,
                     "Sheriff":1,"Villager":max(2, n-6)}
@@ -26531,89 +27118,99 @@ class WizardQ6RolesView(View):
 
     def _build(self):
         self.clear_items()
-        # Three dropdowns — one per team, multi-select
-        wolf_opts = [discord.SelectOption(
-            label    = r,
-            value    = r,
-            default  = r in self.state.role_counts and self.state.role_counts[r] > 0
-        ) for r in self.WOLVES]
+        wolf_opts  = [discord.SelectOption(label=r, value=r,
+                       default=self.state.role_counts.get(r,0)>0) for r in self.WOLVES]
+        vil_opts_1 = [discord.SelectOption(label=r, value=r,
+                       default=self.state.role_counts.get(r,0)>0) for r in self.VILLAGE[:15]]
+        vil_opts_2 = [discord.SelectOption(label=r, value=r,
+                       default=self.state.role_counts.get(r,0)>0) for r in self.VILLAGE[15:]]
+        neu_opts   = [discord.SelectOption(label=r, value=r,
+                       default=self.state.role_counts.get(r,0)>0) for r in self.NEUTRALS]
 
-        vil_opts = [discord.SelectOption(
-            label    = r,
-            value    = r,
-            default  = r in self.state.role_counts and self.state.role_counts[r] > 0
-        ) for r in self.VILLAGE]
+        wolf_sel  = Select(placeholder="🐺 Wolf roles", options=wolf_opts,
+                           min_values=0, max_values=len(wolf_opts), row=0)
+        vil_sel_1 = Select(placeholder="🏘️ Village — Villager → Shapeshifter",
+                           options=vil_opts_1, min_values=0, max_values=len(vil_opts_1), row=1)
+        vil_sel_2 = Select(placeholder="🏘️ Village — Drunk → Diseased",
+                           options=vil_opts_2, min_values=0, max_values=len(vil_opts_2), row=2)
+        neu_sel   = Select(placeholder="⚖️ Neutral roles", options=neu_opts,
+                           min_values=0, max_values=len(neu_opts), row=3)
 
-        neu_opts = [discord.SelectOption(
-            label    = r,
-            value    = r,
-            default  = r in self.state.role_counts and self.state.role_counts[r] > 0
-        ) for r in self.NEUTRALS]
-
-        wolf_sel = Select(placeholder="🐺 Select Wolf roles",
-                          options=wolf_opts, min_values=0,
-                          max_values=len(wolf_opts))
-        vil_sel  = Select(placeholder="🏘️ Select Village roles",
-                          options=vil_opts[:25], min_values=0,
-                          max_values=min(len(vil_opts), 25))
-        neu_sel  = Select(placeholder="⚖️ Select Neutral roles",
-                          options=neu_opts, min_values=0,
-                          max_values=len(neu_opts))
-
-        wolf_sel.callback = self._on_wolves
-        vil_sel.callback  = self._on_village
-        neu_sel.callback  = self._on_neutral
-
+        wolf_sel.callback  = self._on_wolves
+        vil_sel_1.callback = self._on_village_1
+        vil_sel_2.callback = self._on_village_2
+        neu_sel.callback   = self._on_neutral
         self.add_item(wolf_sel)
-        self.add_item(vil_sel)
+        self.add_item(vil_sel_1)
+        self.add_item(vil_sel_2)
         self.add_item(neu_sel)
 
+        total = sum(self.state.role_counts.values())
+        n     = self.state.player_count
+        ok    = total == n
         confirm_btn = Button(
-            label    = f"✅ Confirm Roles ({sum(self.state.role_counts.values())} total)",
-            style    = discord.ButtonStyle.green,
-            row      = 3
-        )
+            label = f"✅ Confirm Roles ({total}/{n})" if not ok else f"✅ Roles Ready ({total}) — Next →",
+            style = discord.ButtonStyle.green if ok else discord.ButtonStyle.secondary,
+            row   = 4)
         confirm_btn.callback = self._on_confirm
         self.add_item(confirm_btn)
 
-        suggest_btn = Button(
-            label    = "🎲 Reset to Suggested",
-            style    = discord.ButtonStyle.secondary,
-            row      = 3
-        )
+        suggest_btn = Button(label="🎲 Reset to Suggested",
+                             style=discord.ButtonStyle.secondary, row=4)
         suggest_btn.callback = self._on_suggest
         self.add_item(suggest_btn)
 
+    def build_embed(self):
+        counts  = self.state.role_counts
+        total   = sum(counts.values())
+        n       = self.state.player_count
+        wolves  = [r for r in self.WOLVES   if counts.get(r,0)>0]
+        village = [r for r in self.VILLAGE  if counts.get(r,0)>0]
+        neutral = [r for r in self.NEUTRALS if counts.get(r,0)>0]
+        embed   = discord.Embed(
+            title       = "Step 3 of 6 — Choose Roles",
+            description = (
+                f"**Players:** {n}  |  **Selected:** {total} "
+                + ("✅" if total==n else f"❌ ({abs(n-total)} {'too many' if total>n else 'short'})") + "\n\n"
+                "*A balanced suggestion is pre-selected. Adjust using the dropdowns.\n"
+                "Villagers auto-fill remaining spots when selected.*"
+            ),
+            color = 0x27AE60 if total==n else 0xE74C3C
+        )
+        embed.add_field(name="🐺 Wolves",   value=", ".join(wolves)  or "*none*", inline=False)
+        embed.add_field(name="🏘️ Village",  value=", ".join(village) or "*none*", inline=False)
+        embed.add_field(name="⚖️ Neutrals", value=", ".join(neutral) or "*none*", inline=False)
+        return embed
+
+    def _auto_fill_villagers(self):
+        assigned  = sum(v for k,v in self.state.role_counts.items() if k != "Villager")
+        remainder = max(0, self.state.player_count - assigned)
+        if "Villager" in self.state.role_counts and remainder > 0:
+            self.state.role_counts["Villager"] = remainder
+
     async def _on_wolves(self, interaction):
-        selected = interaction.data["values"]
-        # Remove wolf roles, re-add selected ones
-        for r in self.WOLVES:
-            self.state.role_counts.pop(r, None)
-        for r in selected:
-            self.state.role_counts[r] = 1
+        for r in self.WOLVES: self.state.role_counts.pop(r, None)
+        for r in interaction.data["values"]: self.state.role_counts[r] = 1
         self._build()
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
-    async def _on_village(self, interaction):
-        selected = interaction.data["values"]
-        for r in self.VILLAGE:
-            self.state.role_counts.pop(r, None)
-        for r in selected:
-            self.state.role_counts[r] = 1
-        # Villager count = remaining players
-        assigned = sum(v for k, v in self.state.role_counts.items() if k != "Villager")
-        remainder = max(0, self.state.player_count - assigned)
-        if "Villager" in selected and remainder > 0:
-            self.state.role_counts["Villager"] = remainder
+    async def _on_village_1(self, interaction):
+        for r in self.VILLAGE[:15]: self.state.role_counts.pop(r, None)
+        for r in interaction.data["values"]: self.state.role_counts[r] = 1
+        self._auto_fill_villagers()
+        self._build()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    async def _on_village_2(self, interaction):
+        for r in self.VILLAGE[15:]: self.state.role_counts.pop(r, None)
+        for r in interaction.data["values"]: self.state.role_counts[r] = 1
+        self._auto_fill_villagers()
         self._build()
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
     async def _on_neutral(self, interaction):
-        selected = interaction.data["values"]
-        for r in self.NEUTRALS:
-            self.state.role_counts.pop(r, None)
-        for r in selected:
-            self.state.role_counts[r] = 1
+        for r in self.NEUTRALS: self.state.role_counts.pop(r, None)
+        for r in interaction.data["values"]: self.state.role_counts[r] = 1
         self._build()
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
@@ -26627,42 +27224,162 @@ class WizardQ6RolesView(View):
         n     = self.state.player_count
         if total != n:
             return await interaction.response.send_message(
-                f"❌ You have **{total}** roles selected but **{n}** players. "
-                f"{'Add' if total < n else 'Remove'} **{abs(n - total)}** more role(s).",
+                f"❌ You have **{total}** roles but **{n}** players. "
+                f"{'Add' if total<n else 'Remove'} **{abs(n-total)}** role(s).",
                 ephemeral=True)
+        view = WizardQ4ThemeView(self.guild_id, self.state)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+
+class WizardQ4ThemeView(View):
+    """Step 4 of 6 — Theme selection via dropdown."""
+    def __init__(self, guild_id: int, state: SetupWizardState):
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+        self.state    = state
+
+        opts = [
+            discord.SelectOption(label="🎮 None — standard game", value="normal",
+                                 default=self.state.theme in (None,"normal")),
+            discord.SelectOption(label="🏰 Disney",               value="disney",
+                                 default=self.state.theme=="disney"),
+            discord.SelectOption(label="⚡ Harry Potter",          value="hp",
+                                 default=self.state.theme=="hp"),
+            discord.SelectOption(label="🏛️ Greek Gods",           value="greek",
+                                 default=self.state.theme=="greek"),
+        ]
+        sel = Select(placeholder="Choose a theme...", options=opts)
+        sel.callback = self.on_select
+        self.add_item(sel)
+
+    def build_embed(self):
+        return discord.Embed(
+            title       = "Step 4 of 6 — Theme",
+            description = (
+                f"**Players:** {self.state.player_count}\n"
+                f"**Roles:** {sum(self.state.role_counts.values())} selected\n\n"
+                "Choose a theme for this game.\n"
+                "*Themes change channel names and role card flavour text.\n"
+                "Choose None for a standard game.*"
+            ),
+            color = 0x3498DB
+        )
+
+    async def on_select(self, interaction):
+        self.state.theme = interaction.data["values"][0]
+        view = WizardQ5SurgeView(self.guild_id, self.state)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+
+class WizardQ5SurgeView(View):
+    """Step 5 of 6 — Ability Surge yes/no."""
+    def __init__(self, guild_id: int, state: SetupWizardState):
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+        self.state    = state
+
+        yes_btn = Button(label="⚡ Yes — Ability Surge on", style=discord.ButtonStyle.primary)
+        no_btn  = Button(label="🎮 No — Standard game",    style=discord.ButtonStyle.secondary)
+        yes_btn.callback = self._on_yes
+        no_btn.callback  = self._on_no
+        self.add_item(yes_btn)
+        self.add_item(no_btn)
+
+    def build_embed(self):
+        theme_labels = {"normal":"🎮 None","disney":"🏰 Disney",
+                        "hp":"⚡ Harry Potter","greek":"🏛️ Greek Gods"}
+        return discord.Embed(
+            title       = "Step 5 of 6 — Ability Surge",
+            description = (
+                f"**Players:** {self.state.player_count}\n"
+                f"**Theme:** {theme_labels.get(self.state.theme,'🎮 None')}\n"
+                f"**Roles:** {sum(self.state.role_counts.values())} selected\n\n"
+                "**Ability Surge** gives every role a second once-per-game ability.\n"
+                "Great for experienced groups — adds significant complexity.\n\n"
+                "Turn it on for this game?"
+            ),
+            color = 0xF39C12
+        )
+
+    async def _on_yes(self, interaction):
+        self.state.surge = True
+        view = WizardQ6ChaosView(self.guild_id, self.state)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+    async def _on_no(self, interaction):
+        self.state.surge = False
+        view = WizardQ6ChaosView(self.guild_id, self.state)
+        await interaction.response.edit_message(embed=view.build_embed(), view=view)
+
+
+class WizardQ6ChaosView(View):
+    """Step 6 of 6 — Chaos mode selection."""
+    def __init__(self, guild_id: int, state: SetupWizardState):
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+        self.state    = state
+
+        opts = [
+            discord.SelectOption(
+                label       = "🎮 No Chaos — standard game",
+                value       = "none",
+                description = "Everyone knows the full role list and player count",
+                default     = self.state.chaos in (None, "none")
+            ),
+            discord.SelectOption(
+                label       = "🎭 Hidden Roster",
+                value       = "roles",
+                description = "Players don't know which roles are in the game"
+            ),
+            discord.SelectOption(
+                label       = "👥 Hidden Count",
+                value       = "count",
+                description = "Players don't know how many players are in the game"
+            ),
+            discord.SelectOption(
+                label       = "🌪️ Full Chaos",
+                value       = "full",
+                description = "Both the role list AND player count are hidden"
+            ),
+        ]
+        sel = Select(placeholder="Choose a chaos setting...", options=opts)
+        sel.callback = self.on_select
+        self.add_item(sel)
+
+    def build_embed(self):
+        theme_labels = {"normal":"🎮 None","disney":"🏰 Disney",
+                        "hp":"⚡ Harry Potter","greek":"🏛️ Greek Gods"}
+        return discord.Embed(
+            title       = "Step 6 of 6 — Chaos Mode",
+            description = (
+                f"**Players:** {self.state.player_count}\n"
+                f"**Theme:** {theme_labels.get(self.state.theme,'🎮 None')}\n"
+                f"**Surge:** {'⚡ On' if self.state.surge else 'Off'}\n"
+                f"**Roles:** {sum(self.state.role_counts.values())} selected\n\n"
+                "Choose a chaos setting for this game:\n\n"
+                "🎮 **No Chaos** — everyone knows the full role list and player count\n"
+                "🎭 **Hidden Roster** — players don't know which roles are in the game\n"
+                "👥 **Hidden Count** — players don't know how many players there are\n"
+                "🌪️ **Full Chaos** — both the role list AND player count are hidden"
+            ),
+            color = 0xE74C3C
+        )
+
+    async def on_select(self, interaction):
+        self.state.chaos = interaction.data["values"][0]
         view = WizardConfirmView(self.guild_id, self.state)
         await interaction.response.edit_message(embed=view.build_embed(), view=view)
 
+
+class WizardQ6RolesView(View):
+    """Legacy alias."""
+    def __init__(self, guild_id, state):
+        super().__init__(timeout=300)
+        self.guild_id = guild_id
+        self.state    = state
+
     def build_embed(self):
-        theme_labels = {"normal":"🎮 Normal","disney":"🏰 Disney","hp":"⚡ Harry Potter","greek":"🏛️ Greek Gods"}
-        chaos_labels = {"none":"None","roles":"Hidden Roster","count":"Hidden Count","full":"Full Chaos"}
-        counts     = self.state.role_counts
-        total      = sum(counts.values())
-        n          = self.state.player_count
-        wolves_sel = [r for r in self.WOLVES   if counts.get(r, 0) > 0]
-        vil_sel    = [r for r in self.VILLAGE  if counts.get(r, 0) > 0]
-        neu_sel    = [r for r in self.NEUTRALS if counts.get(r, 0) > 0]
-
-        def fmt(lst): return ", ".join(lst) if lst else "*none*"
-        color = 0x27AE60 if total == n else 0xE74C3C
-
-        embed = discord.Embed(
-            title       = "Step 6 of 6 — Role Selection",
-            description = (
-                f"**Players:** {n}  |  **Roles selected:** {total} "
-                f"{'✅' if total == n else f'❌ ({abs(n-total)} {"too many" if total > n else "short"})'}\n"
-                f"**Theme:** {theme_labels.get(self.state.theme,'Normal')}  |  "
-                f"**Surge:** {'⚡ On' if self.state.surge else 'Off'}  |  "
-                f"**Chaos:** {chaos_labels.get(self.state.chaos,'None')}\n\n"
-                "*A balanced suggestion is pre-selected. Adjust using the dropdowns below.*\n"
-                "*Villagers are set automatically to fill remaining spots.*"
-            ),
-            color = color
-        )
-        embed.add_field(name="🐺 Wolves",   value=fmt(wolves_sel), inline=False)
-        embed.add_field(name="🏘️ Village",  value=fmt(vil_sel),    inline=False)
-        embed.add_field(name="⚖️ Neutrals", value=fmt(neu_sel),    inline=False)
-        return embed
+        return discord.Embed(title="Roles", description="Use /game_setup instead.")
 
 
 class WizardConfirmView(View):
@@ -26680,7 +27397,7 @@ class WizardConfirmView(View):
         self.add_item(back)
 
     def build_embed(self):
-        theme_labels = {"normal":"🎮 Normal","disney":"🏰 Disney","hp":"⚡ Harry Potter","greek":"🏛️ Greek Gods"}
+        theme_labels = {"normal":"🎮 None (standard)","disney":"🏰 Disney","hp":"⚡ Harry Potter","greek":"🏛️ Greek Gods"}
         chaos_labels = {"none":"None","roles":"🎭 Hidden Roster","count":"👥 Hidden Count","full":"🌪️ Full Chaos"}
         counts = self.state.role_counts
         res    = self.state.reservations
@@ -26719,7 +27436,7 @@ class WizardConfirmView(View):
         return embed
 
     async def _on_back(self, interaction):
-        view = WizardQ6RolesView(self.guild_id, self.state)
+        view = WizardQ6ChaosView(self.guild_id, self.state)
         await interaction.response.edit_message(embed=view.build_embed(), view=view)
 
     async def _on_launch(self, interaction: discord.Interaction):
@@ -26769,7 +27486,7 @@ class WizardConfirmView(View):
             ephemeral=True)
 
 
-@tree.command(name="setup_wizard", description="Question-driven game setup wizard — the easiest way to start a new game")
+@tree.command(name="game_setup", description="Step-by-step game setup — players, roles, theme, and surge")
 @is_mod()
 async def setup_wizard_cmd(interaction: discord.Interaction):
     if game_active(interaction.guild_id):
