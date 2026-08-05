@@ -13342,11 +13342,22 @@ class ConfirmStartView(View):
 
         # Token Shop — post the shop embed with all tokens and Wild Token exchange button
         try:
-            shop_embed = build_token_shop_embed()
-            shop_view  = TokenShopView(interaction.guild_id)
-            await shop_ch.send(embed=shop_embed, view=shop_view)
+            if shop_ch:
+                shop_embed = build_token_shop_embed()
+                shop_view  = TokenShopView(interaction.guild_id)
+                await shop_ch.send(embed=shop_embed, view=shop_view)
+                print(f"[token_shop] Posted to {shop_ch.name}")
+            else:
+                print("[token_shop] shop_ch is None — channel not created")
         except Exception as e:
+            import traceback
             print(f"[token_shop] post error: {e}")
+            traceback.print_exc()
+
+        # Re-read state now that all IDs have been saved
+        invalidate_cache(interaction.guild_id)
+        fresh_state = cached_get_state(interaction.guild_id) or {}
+
         tl_msg = await timeline_ch.send(embed=build_timeline_embed(interaction.guild_id, fresh_state))
         db_set_state(interaction.guild_id, timeline_msg_id=tl_msg.id)
 
@@ -26902,16 +26913,22 @@ class WizardQ2ReservationsView(View):
         )
 
     async def on_add(self, interaction: discord.Interaction):
+        self.guild = interaction.guild  # keep guild reference fresh
         members = sorted(
             [m for m in interaction.guild.members if not m.bot],
             key=lambda m: m.display_name.lower()
         )
         view = WizardReservationPickerView(
             self.guild_id, self.state, members, parent=self)
+        added = len(self.state.reservations)
         await interaction.response.edit_message(
             embed=discord.Embed(
                 title       = "Step 2 of 6 — Add Reservation",
-                description = "Choose a player and a role, then click **Confirm**.",
+                description = (
+                    (f"**{added} reservation{'s' if added != 1 else ''} added so far.**\n\n" if added else "") +
+                    "Choose a player and a role, then click **Confirm**.\n"
+                    "You can keep adding more after each confirmation."
+                ),
                 color       = 0x9B59B6
             ),
             view=view
@@ -27047,11 +27064,15 @@ class WizardReservationPickerView(View):
         if not self.selected_pid or not self._selected_role:
             return await interaction.response.send_message(
                 "Select both a player and a role.", ephemeral=True)
+        # Add to reservations
         self.state.reservations[self.selected_pid] = self._selected_role
-        self.parent.guild = interaction.guild
+        # Update parent and return to it
+        self.parent.guild  = interaction.guild
+        self.parent.state  = self.state
         self.parent._build()
         await interaction.response.edit_message(
-            embed=self.parent.build_embed(), view=self.parent)
+            embed = self.parent.build_embed(),
+            view  = self.parent)
 
     async def on_back(self, interaction):
         self.parent.guild = interaction.guild
@@ -27478,12 +27499,18 @@ class WizardConfirmView(View):
             hide_roles=hide_roles, hide_count=hide_count,
             disney=disney, hp=hp, greek=greek, surge=surge
         )
-        await confirm_view.launch_game(interaction)
+        try:
+            await confirm_view.launch_game(interaction)
+        except Exception as e:
+            print(f"[game_setup] launch_game error: {e}")
 
-        await interaction.followup.send(
-            "🚀 **Game launched!** Channels are being created now.\n"
-            "Run `/mod_dashboard` to open your control panel.",
-            ephemeral=True)
+        try:
+            await interaction.followup.send(
+                "🚀 **Game launched!** Channels are being created now.\n"
+                "Run `/mod_dashboard` to open your control panel.",
+                ephemeral=True)
+        except Exception:
+            pass
 
 
 @tree.command(name="game_setup", description="Step-by-step game setup — players, roles, theme, and surge")
